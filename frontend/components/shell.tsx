@@ -1,0 +1,176 @@
+"use client";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import { LayoutDashboard, BookHeart, CheckSquare, Repeat, Wallet, Timer, Sparkles, MessageSquare, Focus, Plus, Settings, Scale, Apple, TrendingUp, Sun, Moon } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { CommandPalette } from "./command-palette";
+import { ProfileProvider, useProfile } from "@/lib/profile";
+import { OnboardingModal } from "./onboarding";
+import { ThemeProvider, useTheme } from "@/lib/theme";
+
+type NavItem = { href: string; label: string; icon: any };
+type Section = { label?: string; href?: string; icon?: any; items: NavItem[] };
+const sections: Section[] = [
+  { items: [
+    { href: "/",        label: "Home",    icon: LayoutDashboard },
+    { href: "/journal", label: "Journal", icon: BookHeart },
+    { href: "/tasks",   label: "Tasks",   icon: CheckSquare },
+    { href: "/habits",  label: "Habits",  icon: Repeat },
+  ] },
+  { label: "Time",   href: "/time",   icon: Timer,  items: [
+    { href: "/time",    label: "Sessions",    icon: Timer },
+    { href: "/focus",   label: "Focus",       icon: Focus },
+  ] },
+  { label: "Money",  href: "/money",  icon: Wallet, items: [
+    { href: "/money",   label: "Overview",    icon: Wallet },
+    { href: "/finance", label: "Expenses",    icon: Wallet },
+    { href: "/invest",  label: "Investments", icon: TrendingUp },
+  ] },
+  { label: "Health", href: "/health", icon: Apple, items: [
+    { href: "/health",  label: "Overview",    icon: Apple },
+    { href: "/meals",   label: "Meals",       icon: Apple },
+    { href: "/weight",  label: "Weight",      icon: Scale },
+  ] },
+  { items: [
+    { href: "/review",  label: "Review",   icon: Sparkles },
+    { href: "/chat",    label: "Chat",     icon: MessageSquare },
+    { href: "/settings",label: "Settings", icon: Settings },
+  ] },
+];
+// Flat list for mobile bottom nav
+const items = sections.flatMap(s => s.items);
+
+export function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <ThemeProvider>
+      <ProfileProvider>
+        <ShellInner>{children}</ShellInner>
+      </ProfileProvider>
+    </ThemeProvider>
+  );
+}
+
+function ShellInner({ children }: { children: React.ReactNode }) {
+  const p = usePathname();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const { profile, loading } = useProfile();
+  const [timerActive, setTimerActive] = useState(false);
+
+  useEffect(() => {
+    const check = async () => {
+      try { const a = await (await fetch((process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787") + "/time/active", { cache: "no-store" })).json(); setTimerActive(!!a && !a.ended_at && a.id); } catch {}
+    };
+    check();
+    const id = setInterval(check, 10_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setPaletteOpen(v => !v); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
+  return (
+    <div className="flex flex-col md:flex-row min-h-screen">
+      {/* Sidebar (md+) */}
+      <aside className="hidden md:flex md:flex-col w-56 shrink-0 border-r border-border bg-card/40 backdrop-blur px-3 py-6 gap-1">
+        <div className="px-3 pb-6 flex items-center justify-between">
+          <div>
+            <div className="text-lg font-semibold tracking-tight">LifeOS</div>
+            <div className="text-xs text-muted-foreground">your life, tracked</div>
+          </div>
+          <ThemeIcon />
+        </div>
+        {sections.map((sec, i) => (
+          <div key={i} className={i > 0 ? "mt-3" : ""}>
+            {sec.label && (
+              sec.href ? (
+                <Link href={sec.href}
+                  className="flex items-center gap-1.5 px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70 hover:text-foreground transition">
+                  {sec.icon && <sec.icon className="h-3 w-3" />}
+                  {sec.label}
+                </Link>
+              ) : (
+                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+                  {sec.label}
+                </div>
+              )
+            )}
+            {sec.items.map(({ href, label, icon: Icon }) => {
+              const active = p === href;
+              const showDot = href === "/time" && timerActive;
+              return (
+                <Link key={href} href={href}
+                  className={cn("flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors relative",
+                    active ? "bg-secondary text-secondary-foreground" : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground")}>
+                  <span className="relative">
+                    <Icon className="h-4 w-4" />
+                    {showDot && <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-red-500 animate-pulse" />}
+                  </span>
+                  {label}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
+        <div className="mt-auto px-3 pt-6">
+          <button onClick={() => setPaletteOpen(true)}
+            className="w-full flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60">
+            <Plus className="h-3.5 w-3.5" /> Quick log <span className="ml-auto opacity-70">⌘K</span>
+          </button>
+        </div>
+      </aside>
+
+      <main className="flex-1 min-w-0 p-4 pb-24 md:p-8 md:pb-8 overflow-x-hidden">
+        {children}
+      </main>
+
+      {/* Mobile bottom nav + FAB */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 border-t border-border bg-background/95 backdrop-blur pb-[env(safe-area-inset-bottom)]">
+        <div className="flex overflow-x-auto no-scrollbar items-stretch">
+          {items.map(({ href, label, icon: Icon }) => {
+            const active = href === "/" ? p === "/" : p.startsWith(href);
+            const showDot = href === "/time" && timerActive;
+            return (
+              <Link key={href} href={href}
+                className={cn("shrink-0 flex flex-col items-center gap-0.5 py-2 px-3 text-[10px] min-w-[64px] relative",
+                  active ? "text-foreground" : "text-muted-foreground")}>
+                <span className="relative">
+                  <Icon className={cn("h-5 w-5", active && "text-primary")} />
+                  {showDot && <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-red-500 animate-pulse" />}
+                </span>
+                {label}
+              </Link>
+            );
+          })}
+        </div>
+      </nav>
+      <button onClick={() => setPaletteOpen(true)}
+        aria-label="Quick log"
+        className="md:hidden fixed right-4 bottom-20 z-40 h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center active:scale-95 transition">
+        <Plus className="h-6 w-6" />
+      </button>
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <OnboardingModal open={!loading && !profile} />
+    </div>
+  );
+}
+
+function ThemeIcon() {
+  const { resolved, setMode } = useTheme();
+  const Icon = resolved === "dark" ? Sun : Moon;
+  return (
+    <button
+      aria-label="Toggle theme"
+      title={resolved === "dark" ? "Switch to light" : "Switch to dark"}
+      onClick={() => setMode(resolved === "dark" ? "light" : "dark")}
+      className="h-8 w-8 rounded-lg border border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition">
+      <Icon className="h-4 w-4" />
+    </button>
+  );
+}

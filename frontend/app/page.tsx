@@ -1,0 +1,225 @@
+"use client";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { api, type Summary, type Stats } from "@/lib/api";
+import { StatCard } from "@/components/stat-card";
+import { StatsCharts } from "@/components/stats-charts";
+import { Card } from "@/components/card";
+import { Heart, Wallet, Timer, CheckSquare, Moon, Sparkles, Scale, Apple, Sun } from "lucide-react";
+import { useProfile, currencySymbol, daysAlive, ageYears } from "@/lib/profile";
+import { LivedCounter } from "@/components/lived-counter";
+import { ChatWidget } from "@/components/chat-widget";
+import { ActiveSession } from "@/components/active-session";
+
+export default function Dashboard() {
+  const [today, setToday] = useState<Summary | null>(null);   // fixed: always today (rolling 7d for "week" avg)
+  const [ranged, setRanged] = useState<Summary | null>(null); // range-driven averages
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [range, setRange] = useState<number>(30);
+  const { profile } = useProfile();
+  const sym = currencySymbol(profile?.currency);
+  const firstName = profile?.name?.split(" ")[0] ?? "";
+  const alive = daysAlive(profile?.dob);
+  const age = ageYears(profile?.dob);
+
+  // Load "today" once + on tick (never range-dependent)
+  useEffect(() => {
+    const load = () => api.summary(7).then(setToday).catch(() => {});
+    load();
+    const id = setInterval(load, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Range-dependent trend + averages
+  useEffect(() => {
+    api.summary(range).then(setRanged).catch(() => {});
+    api.stats(range).then(setStats).catch(() => {});
+  }, [range]);
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-8">
+      <Header firstName={firstName} alive={alive} age={age} goal={profile?.goal} />
+
+      <ActiveSession />
+
+      {/* Today — always full-strength, no range dependency */}
+      <section className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Today</h2>
+          <div className="flex items-center gap-2">
+            <ChatWidget />
+            <span className="text-xs text-muted-foreground hidden sm:inline">
+              or <kbd className="rounded border border-border px-1.5 py-0.5">⌘K</kbd>
+            </span>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <StatCard icon={Heart} label="Mood"
+            value={today?.mood.today != null ? today.mood.today.toFixed(1) : "—"}
+            sub={today?.mood.latest != null
+              ? `avg today · latest ${today.mood.latest}${today.mood.latest_ts ? ` at ${new Date(today.mood.latest_ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
+              : "not logged yet"}
+            tone={today?.mood.today == null ? "default" : today.mood.today >= 7 ? "good" : today.mood.today >= 4 ? "default" : "warn"} />
+          <StatCard icon={Moon} label="Sleep"
+            value={today?.sleep.last?.hours != null ? `${today.sleep.last.hours}h` : "—"}
+            sub={today?.sleep.last?.day === today?.day
+              ? (profile?.sleep_target_hours ? `target ${profile.sleep_target_hours}h` : "logged")
+              : (today?.sleep.last?.day ? `last: ${today.sleep.last.day}` : "log tonight")}
+            tone={today?.sleep.last?.hours == null ? "default" :
+                  profile?.sleep_target_hours && today.sleep.last.hours >= profile.sleep_target_hours ? "good" :
+                  today.sleep.last.hours >= 6 ? "default" : "warn"} />
+          <StatCard icon={Timer} label="Deep work"
+            value={`${today?.time.today ?? 0}h`}
+            sub="tracked sessions"
+            tone={(today?.time.today ?? 0) >= 3 ? "good" : "default"} />
+          <StatCard icon={CheckSquare} label="Tasks"
+            value={`${today?.tasks.done_today ?? 0}/${(today?.tasks.done_today ?? 0) + (today?.tasks.open ?? 0)}`}
+            sub={today?.tasks.overdue ? `${today.tasks.overdue} overdue` : "on track"}
+            tone={today?.tasks.overdue ? "bad" : "default"} />
+
+          <StatCard icon={Wallet} label="Spent"
+            value={today ? `${sym}${today.spend.today.toFixed(2)}` : "—"}
+            sub="today only" />
+          <StatCard icon={Apple} label="Calories"
+            value={today?.calories?.today ?? 0}
+            sub="today only" />
+          <StatCard icon={Sparkles} label="Wins"
+            value={today?.positive.wins ?? 0}
+            sub="what did you do well?"
+            tone={(today?.positive.wins ?? 0) > 0 ? "good" : "default"} />
+          <StatCard icon={Heart} label="Gratitude"
+            value={today?.positive.gratitude ?? 0}
+            sub="one line is enough"
+            tone={(today?.positive.gratitude ?? 0) > 0 ? "good" : "default"} />
+        </div>
+
+        <NudgeCard s={today} />
+      </section>
+
+      {/* Trend — range-driven */}
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Trend</h2>
+          <RangeToggle range={range} setRange={setRange} />
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <MiniStat label={`Spent (${rangeLabel(range)})`}
+            value={ranged ? `${sym}${ranged.spend.week.toFixed(0)}` : "—"} />
+          <MiniStat label={`Avg mood`}
+            value={ranged?.mood.week != null ? ranged.mood.week.toFixed(1) : "—"} />
+          <MiniStat label={`Avg sleep`}
+            value={ranged?.sleep.avg7 != null ? `${ranged.sleep.avg7.toFixed(1)}h` : "—"} />
+          <MiniStat label={`Weight change`}
+            value={ranged?.weight?.delta != null ? `${ranged.weight.delta > 0 ? "+" : ""}${ranged.weight.delta} kg` : "—"} />
+        </div>
+
+        <Card>
+          <StatsCharts stats={stats} />
+        </Card>
+      </section>
+
+      <section className="grid gap-4 md:grid-cols-3">
+        <ShortcutCard href="/journal" title="Reflect" body="Journal, wins, gratitude — the mind-clearing routine." />
+        <ShortcutCard href="/habits"  title="Habits"  body="Small things done often become identity." />
+        <ShortcutCard href="/review"  title="Weekly review" body="Sunday ritual: what happened, what's next." />
+      </section>
+    </div>
+  );
+}
+
+function Header({ firstName, alive, age, goal }: { firstName: string; alive: number | null; age: number | null; goal?: string | null }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const id = setInterval(() => tick(t => t + 1), 1000); return () => clearInterval(id); }, []);
+
+  const now = new Date();
+  const greet =
+    now.getHours() < 5  ? "still up"   :
+    now.getHours() < 12 ? "good morning":
+    now.getHours() < 17 ? "good afternoon":
+    now.getHours() < 21 ? "good evening": "good night";
+  const dateStr = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  return (
+    <header className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+          {greet}{firstName && `, ${firstName}`}.
+        </h1>
+        <div className="text-lg font-medium tabular-nums text-muted-foreground">{timeStr}</div>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
+        <span className="flex items-center gap-1.5"><Sun className="h-3.5 w-3.5" /> {dateStr}</span>
+        {(alive != null) ? <LivedCounterWrap /> : null}
+        {age != null && <span>age {age}</span>}
+        {goal && <span className="italic">focus: {goal}</span>}
+      </div>
+    </header>
+  );
+}
+
+function LivedCounterWrap() {
+  const { profile } = useProfile();
+  if (!profile?.dob) return null;
+  return <LivedCounter dob={profile.dob} />;
+}
+
+function RangeToggle({ range, setRange }: { range: number; setRange: (n: number) => void }) {
+  const opts: [number, string][] = [[7, "7d"], [30, "30d"], [90, "90d"], [365, "1y"]];
+  return (
+    <div className="inline-flex rounded-lg border border-border bg-card/40 p-0.5 text-xs">
+      {opts.map(([n, l]) => (
+        <button key={n} onClick={() => setRange(n)}
+          className={`px-3 py-1.5 rounded-md transition ${range === n ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+          {l}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function rangeLabel(n: number) {
+  if (n <= 7)   return "7d";
+  if (n <= 30)  return "30d";
+  if (n <= 90)  return "90d";
+  return "1y";
+}
+
+function MiniStat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-border bg-card/40 px-4 py-3">
+      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 text-xl font-semibold tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+function ShortcutCard({ href, title, body }: { href: string; title: string; body: string }) {
+  return (
+    <Link href={href} className="group block rounded-2xl border border-border bg-card/60 backdrop-blur p-5 hover:bg-card transition">
+      <div className="text-sm font-medium">{title}</div>
+      <div className="text-xs text-muted-foreground mt-1">{body}</div>
+      <div className="mt-3 text-xs text-primary opacity-0 group-hover:opacity-100 transition">open →</div>
+    </Link>
+  );
+}
+
+function NudgeCard({ s }: { s: Summary | null }) {
+  let msg = "You're doing fine.";
+  let tone: "default" | "warn" | "good" = "default";
+  if (!s)                                        msg = "loading…";
+  else if (s.sleep.last?.hours == null)          { msg = "Log sleep — it colors everything else.";     tone = "warn"; }
+  else if (s.positive.wins === 0)                { msg = "Notice one win today. It compounds."; }
+  else if (s.positive.gratitude === 0)           { msg = "One line of gratitude — 10 seconds."; }
+  else if (s.mood.today == null)                 { msg = "Quick mood check-in?"; }
+  else if (s.tasks.overdue > 0)                  { msg = `${s.tasks.overdue} overdue — reschedule or drop them.`; tone = "warn"; }
+  else                                            { msg = "All the basics are logged. Nice.";          tone = "good"; }
+  return (
+    <div className={`rounded-xl border border-border bg-card/40 px-4 py-3 text-sm ${
+      tone === "warn" ? "text-amber-500" : tone === "good" ? "text-emerald-500" : "text-foreground"
+    }`}>
+      {msg}
+    </div>
+  );
+}

@@ -1,0 +1,144 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { q, q1 } from "./db.ts";
+
+const VAULT = process.env.VAULT_PATH ?? `${process.env.HOME}/Obsidian`;
+const SUBDIR = process.env.JOURNAL_SUBDIR ?? "Journal";
+const DIR = join(VAULT, SUBDIR);
+
+/** Write one markdown file summarizing everything for `day` (YYYY-MM-DD). */
+export async function syncDay(day: string): Promise<string> {
+  await mkdir(DIR, { recursive: true });
+
+  const journal = q1<{ content: string }>(
+    "SELECT content FROM journals WHERE day = ?", day);
+  const txns = q<{ ts: string; amount: number; category: string; note: string | null; kind: string }>(
+    "SELECT ts,amount,category,note,kind FROM transactions WHERE date(ts, 'localtime')=? ORDER BY ts", day);
+  const moods = q<{ ts: string; score: number; note: string | null }>(
+    "SELECT ts,score,note FROM moods WHERE date(ts, 'localtime')=? ORDER BY ts", day);
+  const sessions = q<{ label: string; category: string; started_at: string; ended_at: string | null }>(
+    "SELECT label,category,started_at,ended_at FROM time_sessions WHERE date(started_at, 'localtime')=? ORDER BY started_at", day);
+  const tasksDue = q<{ id: number; title: string; done: number; priority: number }>(
+    "SELECT id,title,done,priority FROM tasks WHERE due_date=? ORDER BY done, priority DESC, id", day);
+  const tasksDone = q<{ id: number; title: string; priority: number }>(
+    "SELECT id,title,priority FROM tasks WHERE date(done_at, 'localtime')=? AND done=1 AND (due_date IS NULL OR due_date<>?) ORDER BY done_at", day, day);
+  const wins = q<{ text: string }>("SELECT text FROM wins WHERE day=? ORDER BY id", day);
+  const grats = q<{ text: string }>("SELECT text FROM gratitudes WHERE day=? ORDER BY id", day);
+  const sleep = q1<{ bedtime: string | null; waketime: string | null; hours: number | null; quality: number | null; note: string | null }>(
+    "SELECT bedtime,waketime,hours,quality,note FROM sleep WHERE day=?", day);
+  const habitLogs = q<{ name: string; note: string | null; color: string }>(
+    "SELECT h.name, hl.note, h.color FROM habit_logs hl JOIN habits h ON h.id=hl.habit_id WHERE hl.day=? ORDER BY h.name", day);
+  const mood2d = q<{ ts: string; energy: number; valence: number; tag: string | null; note: string | null }>(
+    "SELECT ts,energy,valence,tag,note FROM mood2d WHERE date(ts, 'localtime')=? ORDER BY ts", day);
+  const weight = q1<{ kg: number; note: string | null }>("SELECT kg,note FROM weight WHERE day=?", day);
+  const meals  = q<{ ts: string; name: string; kcal: number; protein_g: number | null; carbs_g: number | null; fat_g: number | null }>(
+    "SELECT ts,name,kcal,protein_g,carbs_g,fat_g FROM meals WHERE date(ts, 'localtime')=? ORDER BY ts", day);
+
+  const spent  = txns.filter(t => t.kind === "expense").reduce((s, t) => s + t.amount, 0);
+  const income = txns.filter(t => t.kind === "income").reduce((s, t) => s + t.amount, 0);
+  const avgMood = moods.length
+    ? Math.round((moods.reduce((s, m) => s + m.score, 0) / moods.length) * 10) / 10
+    : (mood2d.length
+        ? Math.round((mood2d.reduce((s, m) => s + m.valence, 0) / mood2d.length) * 10) / 10
+        : null);
+  const avgEnergy = mood2d.length
+    ? Math.round((mood2d.reduce((s, m) => s + m.energy, 0) / mood2d.length) * 10) / 10
+    : null;
+  const hours = sessions.reduce((s, x) => x.ended_at
+    ? s + (new Date(x.ended_at).getTime() - new Date(x.started_at).getTime()) / 3.6e6
+    : s, 0);
+
+  const kcalTotal = meals.reduce((s, m) => s + m.kcal, 0);
+
+  const lines: string[] = [
+    "---",
+    `date: ${day}`,
+    `mood: ${avgMood ?? ""}`,
+    `energy: ${avgEnergy ?? ""}`,
+    `sleep_hours: ${sleep?.hours ?? ""}`,
+    `sleep_quality: ${sleep?.quality ?? ""}`,
+    `weight_kg: ${weight?.kg ?? ""}`,
+    `calories: ${kcalTotal || ""}`,
+    `spent: ${spent.toFixed(2)}`,
+    `income: ${income.toFixed(2)}`,
+    `work_hours: ${hours.toFixed(2)}`,
+    "tags: [lifeos]",
+    "---",
+    "",
+    `# ${day}`,
+    "",
+  ];
+
+  if (sleep) {
+    lines.push("## Sleep", "");
+    lines.push(`- ${sleep.bedtime ?? "?"} → ${sleep.waketime ?? "?"} · ${sleep.hours?.toFixed(1) ?? "?"}h · quality ${sleep.quality ?? "?"}/10`);
+    if (sleep.note) lines.push(`- ${sleep.note}`);
+    lines.push("");
+  }
+
+  if (weight) {
+    lines.push("## Weight", "", `- ${weight.kg} kg${weight.note ? ` — ${weight.note}` : ""}`, "");
+  }
+
+  if (meals.length) {
+    lines.push("## Meals", "");
+    for (const m of meals) {
+      const macro = [m.protein_g && `${m.protein_g}p`, m.carbs_g && `${m.carbs_g}c`, m.fat_g && `${m.fat_g}f`].filter(Boolean).join(" / ");
+      lines.push(`- ${m.name} — ${m.kcal} kcal${macro ? ` (${macro})` : ""}`);
+    }
+    lines.push(`- **total: ${kcalTotal} kcal**`, "");
+  }
+
+  if (wins.length) {
+    lines.push("## Wins", "");
+    for (const w of wins) lines.push(`- ✅ ${w.text}`);
+    lines.push("");
+  }
+  if (grats.length) {
+    lines.push("## Gratitude", "");
+    for (const g of grats) lines.push(`- 🙏 ${g.text}`);
+    lines.push("");
+  }
+  if (habitLogs.length) {
+    lines.push("## Habits", "");
+    for (const h of habitLogs) lines.push(`- ✓ ${h.name}${h.note ? ` — ${h.note}` : ""}`);
+    lines.push("");
+  }
+
+  lines.push("## Journal", "");
+  lines.push(journal?.content ?? "_(empty)_");
+  lines.push("");
+
+  if (tasksDue.length || tasksDone.length) {
+    lines.push("## Tasks", "");
+    for (const t of tasksDue)  lines.push(`- [${t.done ? "x" : " "}] ${t.title}${t.priority === 3 ? " ❗" : ""}`);
+    for (const t of tasksDone) lines.push(`- [x] ${t.title} _(completed today)_`);
+    lines.push("");
+  }
+  if (sessions.length) {
+    lines.push("## Time", "");
+    for (const s of sessions) {
+      const end = s.ended_at ?? "…";
+      lines.push(`- **${s.label}** (${s.category ?? "—"}) — ${s.started_at} → ${end}`);
+    }
+    lines.push("");
+  }
+  if (txns.length) {
+    lines.push("## Finance", "");
+    for (const t of txns) {
+      const sign = t.kind === "income" ? "+" : "-";
+      lines.push(`- ${sign}${t.amount.toFixed(2)} · ${t.category} · ${t.note ?? ""} (${t.ts})`);
+    }
+    lines.push("");
+  }
+  if (moods.length || mood2d.length) {
+    lines.push("## Mood", "");
+    for (const m of mood2d) lines.push(`- 🔵 valence ${m.valence}/10, energy ${m.energy}/10${m.tag ? ` · ${m.tag}` : ""}${m.note ? ` — ${m.note}` : ""} (${m.ts})`);
+    for (const m of moods)  lines.push(`- ${m.score}/10 — ${m.note ?? ""} (${m.ts})`);
+    lines.push("");
+  }
+
+  const path = join(DIR, `${day}.md`);
+  await writeFile(path, lines.join("\n"), "utf-8");
+  return path;
+}

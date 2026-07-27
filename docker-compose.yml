@@ -1,0 +1,62 @@
+services:
+  backend:
+    build: ./backend
+    image: lifeos-backend
+    container_name: lifeos-backend
+    restart: unless-stopped
+    ports: ["8787:8787"]
+    environment:
+      PORT: 8787
+      DB_PATH: /data/lifeos.db
+      VAULT_PATH: /vault
+      JOURNAL_SUBDIR: ${JOURNAL_SUBDIR:-Journal}
+      LLM_PROXY_URL: ${LLM_PROXY_URL:-http://llm-proxy:4000}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-copilot-sonnet}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      # SQLite DB persists across container recreates
+      - lifeos-data:/data
+      # Obsidian vault — bind-mount so notes stay on host
+      - ${VAULT_PATH:-~/Obsidian}:/vault
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Backend URL as seen from the browser (host, not container).
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8787}
+    image: lifeos-frontend
+    container_name: lifeos-frontend
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    depends_on: [backend]
+
+  # Optional: LiteLLM proxy — only needed if you route LLMs through it
+  # (e.g. GitHub Copilot pre-in-app-OAuth path).
+  llm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: lifeos-llm-proxy
+    profiles: ["proxy"]     # docker compose --profile proxy up
+    restart: unless-stopped
+    command: ["--config", "/config/config.yaml", "--port", "4000"]
+    ports: ["4000:4000"]
+    volumes:
+      - ./llm-proxy/config.yaml:/config/config.yaml:ro
+      - litellm-tokens:/root/.config/litellm
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+
+volumes:
+  lifeos-data:      # SQLite database
+  litellm-tokens:   # cached Copilot / provider tokens
