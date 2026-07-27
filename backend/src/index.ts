@@ -28,7 +28,6 @@ app.get("/health", (c) => c.json({ ok: true, ts: now() }));
 app.get("/profile", (c) => {
   const p = q1<any>("SELECT * FROM profile WHERE id=1");
   if (!p) return c.json(null);
-  // expose as `values` externally, store as `values_json` internally
   const { values_json, ...rest } = p;
   return c.json({ ...rest, values: values_json ?? null });
 });
@@ -43,21 +42,26 @@ app.put("/profile",
     sleep_target_hours: z.number().min(0).max(24).nullable().optional(),
     values: z.string().nullable().optional(),
     goal: z.string().nullable().optional(),
+    vault_path: z.string().nullable().optional(),
+    journal_subdir: z.string().nullable().optional(),
   })),
   (c) => {
     const p = c.req.valid("json");
-    const existing = q1<{ created_at: string }>("SELECT created_at FROM profile WHERE id=1");
+    const existing = q1<any>("SELECT * FROM profile WHERE id=1");
     const created = existing?.created_at ?? now();
-    run(`INSERT INTO profile(id,name,dob,pronouns,timezone,currency,sleep_target_hours,values_json,goal,created_at,updated_at)
-         VALUES(1,?,?,?,?,?,?,?,?,?,?)
+    run(`INSERT INTO profile(id,name,dob,pronouns,timezone,currency,sleep_target_hours,values_json,goal,vault_path,journal_subdir,created_at,updated_at)
+         VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
            name=excluded.name, dob=excluded.dob, pronouns=excluded.pronouns,
            timezone=excluded.timezone, currency=excluded.currency,
            sleep_target_hours=excluded.sleep_target_hours,
            values_json=excluded.values_json, goal=excluded.goal,
+           vault_path=excluded.vault_path, journal_subdir=excluded.journal_subdir,
            updated_at=excluded.updated_at`,
       p.name, p.dob ?? null, p.pronouns ?? null, p.timezone ?? null,
       p.currency ?? "USD", p.sleep_target_hours ?? 8, p.values ?? null, p.goal ?? null,
+      p.vault_path?.trim() || existing?.vault_path || null,
+      p.journal_subdir?.trim() || existing?.journal_subdir || null,
       created, now());
     return c.json({ ok: true });
   });

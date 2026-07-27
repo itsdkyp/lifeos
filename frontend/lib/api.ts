@@ -195,6 +195,8 @@ export type Profile = {
   sleep_target_hours?: number | null;
   values?: string | null;
   goal?: string | null;
+  vault_path?: string | null;
+  journal_subdir?: string | null;
 };
 
 export type Meal = { id: number; ts: string; name: string; kcal: number; protein_g: number | null; carbs_g: number | null; fat_g: number | null; note: string | null };

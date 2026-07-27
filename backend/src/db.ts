@@ -157,6 +157,10 @@ if (!holdingCols.includes("imported_from")) db.exec("ALTER TABLE holdings ADD CO
 if (!holdingCols.includes("monthly_contribution"))     db.exec("ALTER TABLE holdings ADD COLUMN monthly_contribution REAL DEFAULT 0");
 if (!holdingCols.includes("contribution_last_applied")) db.exec("ALTER TABLE holdings ADD COLUMN contribution_last_applied TEXT");
 
+const profileCols = (db.query("PRAGMA table_info(profile)").all() as any[]).map(c => c.name);
+if (!profileCols.includes("vault_path"))     db.exec("ALTER TABLE profile ADD COLUMN vault_path TEXT");
+if (!profileCols.includes("journal_subdir")) db.exec("ALTER TABLE profile ADD COLUMN journal_subdir TEXT");
+
 // Convenience wrappers
 export const q  = <T = any>(sql: string, ...args: any[]) => db.query(sql).all(...args) as T[];
 export const q1 = <T = any>(sql: string, ...args: any[]) => db.query(sql).get(...args) as T | null;

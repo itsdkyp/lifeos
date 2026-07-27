@@ -81,6 +81,20 @@ export default function Page() {
               <input value={p.goal ?? ""} onChange={e => setP({ ...p, goal: e.target.value })}
                 placeholder="ship LifeOS" className={inputCls} />
             </Field>
+
+            <div className="pt-2 border-t border-border">
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Obsidian sync</div>
+              <div className="space-y-3">
+                <Field label="Vault path" hint="absolute path on this machine (or /vault if running in Docker)">
+                  <input value={p.vault_path ?? ""} onChange={e => setP({ ...p, vault_path: e.target.value })}
+                    placeholder="/Users/you/Documents/Obsidian/MyVault" className={inputCls} />
+                </Field>
+                <Field label="Journal subfolder" hint="where daily notes get written inside the vault">
+                  <input value={p.journal_subdir ?? ""} onChange={e => setP({ ...p, journal_subdir: e.target.value })}
+                    placeholder="Journal" className={inputCls} />
+                </Field>
+              </div>
+            </div>
           </div>
 
           <div className="mt-6 flex items-center justify-between">

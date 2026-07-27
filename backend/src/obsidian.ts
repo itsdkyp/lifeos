@@ -2,12 +2,22 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { q, q1 } from "./db.ts";
 
-const VAULT = process.env.VAULT_PATH ?? `${process.env.HOME}/Obsidian`;
-const SUBDIR = process.env.JOURNAL_SUBDIR ?? "Journal";
-const DIR = join(VAULT, SUBDIR);
+function expandHome(p: string): string {
+  return p.startsWith("~") ? (process.env.HOME ?? "") + p.slice(1) : p;
+}
+
+/** Resolve the vault dir at call time — profile setting wins, env var is fallback. */
+function resolveJournalDir(): string {
+  const p = q1<{ vault_path: string | null; journal_subdir: string | null }>(
+    "SELECT vault_path, journal_subdir FROM profile WHERE id=1");
+  const vault = expandHome(p?.vault_path || process.env.VAULT_PATH || `${process.env.HOME}/Obsidian`);
+  const sub   = p?.journal_subdir || process.env.JOURNAL_SUBDIR || "Journal";
+  return join(vault, sub);
+}
 
 /** Write one markdown file summarizing everything for `day` (YYYY-MM-DD). */
 export async function syncDay(day: string): Promise<string> {
+  const DIR = resolveJournalDir();
   await mkdir(DIR, { recursive: true });
 
   const journal = q1<{ content: string }>(
