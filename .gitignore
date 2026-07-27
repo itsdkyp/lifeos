@@ -16,3 +16,4 @@ coverage/
 .tauri/
 src-tauri/target/
 logs/
+*.bak*
