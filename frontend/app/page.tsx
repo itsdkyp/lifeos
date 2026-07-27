@@ -130,16 +130,23 @@ export default function Dashboard() {
 
 function Header({ firstName, alive, age, goal }: { firstName: string; alive: number | null; age: number | null; goal?: string | null }) {
   const [, tick] = useState(0);
-  useEffect(() => { const id = setInterval(() => tick(t => t + 1), 1000); return () => clearInterval(id); }, []);
+  const [active, setActive] = useState<{ label: string; category: string; started_at: string } | null>(null);
+  useEffect(() => {
+    const loadTimer = () => api.timeActive().then(a => setActive(a as any)).catch(() => {});
+    loadTimer();
+    const clockId = setInterval(() => tick(t => t + 1), 1000);
+    const activeId = setInterval(loadTimer, 10_000);
+    return () => { clearInterval(clockId); clearInterval(activeId); };
+  }, []);
 
   const now = new Date();
   const greet =
-    now.getHours() < 5  ? "still up"   :
+    now.getHours() < 5  ? "still up"    :
     now.getHours() < 12 ? "good morning":
     now.getHours() < 17 ? "good afternoon":
     now.getHours() < 21 ? "good evening": "good night";
   const dateStr = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
-  const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
 
   return (
     <header className="space-y-2">
@@ -149,6 +156,15 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
         </h1>
         <div className="text-lg font-medium tabular-nums text-muted-foreground">{timeStr}</div>
       </div>
+      {active && (
+        <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75 animate-ping" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
+          </span>
+          <span>Working on <b className="font-medium">{active.label}</b> · <span className="text-muted-foreground">{elapsedShort(active.started_at)}</span></span>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
         <span className="flex items-center gap-1.5"><Sun className="h-3.5 w-3.5" /> {dateStr}</span>
         {(alive != null) ? <LivedCounterWrap /> : null}
@@ -157,6 +173,14 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
       </div>
     </header>
   );
+}
+
+function elapsedShort(startIso: string): string {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(startIso).getTime()) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s % 60}s`;
+  return `${s}s`;
 }
 
 function LivedCounterWrap() {
