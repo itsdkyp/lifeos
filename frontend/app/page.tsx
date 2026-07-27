@@ -129,9 +129,11 @@ export default function Dashboard() {
 }
 
 function Header({ firstName, alive, age, goal }: { firstName: string; alive: number | null; age: number | null; goal?: string | null }) {
+  const [mounted, setMounted] = useState(false);
   const [, tick] = useState(0);
   const [active, setActive] = useState<{ label: string; category: string; started_at: string } | null>(null);
   useEffect(() => {
+    setMounted(true);
     const loadTimer = () => api.timeActive().then(a => setActive(a as any)).catch(() => {});
     loadTimer();
     const clockId = setInterval(() => tick(t => t + 1), 1000);
@@ -146,7 +148,8 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
     now.getHours() < 17 ? "good afternoon":
     now.getHours() < 21 ? "good evening": "good night";
   const dateStr = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
-  const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
+  // Force uppercase AM/PM (en-IN locale returns lowercase); render only after client mount to avoid SSR mismatch.
+  const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true }).toUpperCase();
 
   return (
     <header className="space-y-2">
@@ -154,7 +157,9 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
         <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
           {greet}{firstName && `, ${firstName}`}.
         </h1>
-        <div className="text-lg font-medium tabular-nums text-muted-foreground">{timeStr}</div>
+        <div suppressHydrationWarning className="text-lg font-medium tabular-nums text-muted-foreground min-h-[1.75rem]">
+          {mounted ? timeStr : ""}
+        </div>
       </div>
       {active && (
         <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs">
@@ -167,7 +172,9 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
       )}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
         <span className="flex items-center gap-1.5"><Sun className="h-3.5 w-3.5" /> {dateStr}</span>
-        {(alive != null) ? <LivedCounterWrap /> : null}
+        {mounted && (alive != null ? <LivedCounterWrap /> :
+          <Link href="/settings" className="underline underline-offset-2 hover:text-foreground">Set your DOB in Settings for the lived counter</Link>
+        )}
         {age != null && <span>age {age}</span>}
         {goal && <span className="italic">focus: {goal}</span>}
       </div>
