@@ -86,33 +86,6 @@ Tokens live in `oauth_tokens` table in the DB, auto-refreshing.
 The `/chat`, `/holdings/advice`, `/holdings/advisor`, and `/review/week`
 endpoints all call this LLM.
 
-**Known problem** (not LifeOS): pi (the coding agent running this session)
-hits `421 Misdirected Request` on **its own** compaction when using Copilot
-Enterprise. Not user's LifeOS problem. Documented in
-[pi#6768](https://github.com/earendil-works/pi/issues/6768). Applied a
-speculative local patch to
-`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/github-copilot-headers.js`
-adding `X-GitHub-Api-Version: 2026-06-01` to Copilot dynamic headers.
-Doesn't affect LifeOS.
-
-### Extra pi patches (outside this repo) applied at session end
-
-To make Copilot Enterprise compaction stop 421-ing, three files under
-`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/`
-were modified in place. **They do NOT affect LifeOS** — they are only about
-pi's own conversations. Both survive until the next `pi update`.
-
-1. `api/github-copilot-headers.js` — `buildCopilotDynamicHeaders()` now
-   also sends `Copilot-Integration-Id: vscode-copilot` (overrides catalog),
-   `Openai-Intent: conversation-panel`, and `X-GitHub-Api-Version: 2026-06-01`.
-2. `auth/oauth/github-copilot.js` — `getGitHubCopilotBaseUrl()` fallback
-   changed from `api.individual.githubcopilot.com` to
-   `api.business.githubcopilot.com`.
-3. No LifeOS code is affected.
-
-Restore: `npm install --force @earendil-works/pi-ai@latest` inside
-`pi-coding-agent`, or `pi update`.
-
 ---
 
 ## What was just being worked on (last ~30 turns)
