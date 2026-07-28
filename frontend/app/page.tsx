@@ -19,6 +19,7 @@ export default function Dashboard() {
   const { profile } = useProfile();
   const sym = currencySymbol(profile?.currency);
   const firstName = profile?.name?.split(" ")[0] ?? "";
+  const displayName = firstName ? firstName[0]!.toUpperCase() + firstName.slice(1) : "";
   const alive = daysAlive(profile?.dob);
   const age = ageYears(profile?.dob);
 
@@ -38,7 +39,7 @@ export default function Dashboard() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-8">
-      <Header firstName={firstName} alive={alive} age={age} goal={profile?.goal} />
+      <Header firstName={displayName} alive={alive} age={age} goal={profile?.goal} />
 
       <ActiveSession />
 
@@ -143,10 +144,10 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
 
   const now = new Date();
   const greet =
-    now.getHours() < 5  ? "still up"    :
-    now.getHours() < 12 ? "good morning":
-    now.getHours() < 17 ? "good afternoon":
-    now.getHours() < 21 ? "good evening": "good night";
+    now.getHours() < 5  ? "Still up"    :
+    now.getHours() < 12 ? "Good morning":
+    now.getHours() < 17 ? "Good afternoon":
+    now.getHours() < 21 ? "Good evening": "Good night";
   const dateStr = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
   // Force uppercase AM/PM (en-IN locale returns lowercase); render only after client mount to avoid SSR mismatch.
   const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true }).toUpperCase();
@@ -175,7 +176,6 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
         {mounted && (alive != null ? <LivedCounterWrap /> :
           <Link href="/settings" className="underline underline-offset-2 hover:text-foreground">Set your DOB in Settings for the lived counter</Link>
         )}
-        {age != null && <span>age {age}</span>}
         {goal && <span className="italic">focus: {goal}</span>}
       </div>
     </header>
