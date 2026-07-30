@@ -1,0 +1,14 @@
+node_modules
+.next
+.env
+.env.local
+.git
+.github
+.no-vault
+lifeos.db
+lifeos.db-*
+backend/lifeos*.db*
+backend/logs
+logs
+llm-proxy
+*.md

@@ -1,9 +1,18 @@
-let API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+// API base URL selection:
+//   1. NEXT_PUBLIC_API_URL (dev / build-time override) — explicit absolute origin.
+//   2. Otherwise, use same-origin + /_lifeos-api rewrite path (single-container setup).
+// The rewrite is defined in next.config.ts and forwards to the Hono backend on
+// 127.0.0.1:8787 inside the same container. In dev with two separate processes,
+// set NEXT_PUBLIC_API_URL to the explicit http://127.0.0.1:8787 and the rewrite
+// simply doesn't get exercised.
+const API_PREFIX = "/_lifeos-api";
+const envApiUrl = process.env.NEXT_PUBLIC_API_URL;
+let API = envApiUrl && envApiUrl.length > 0 ? envApiUrl : API_PREFIX;
 
-if (typeof window !== "undefined") {
-  // Automatically point to the same host that is serving the frontend, but on port 8787
-  // This allows the app to work seamlessly from phones or other devices on the local network.
-  API = `${window.location.protocol}//${window.location.hostname}:8787`;
+if (typeof window !== "undefined" && (!envApiUrl || envApiUrl.length === 0)) {
+  // Same-origin: window.location.origin + /_lifeos-api. Works from any host,
+  // any port, over HTTP or HTTPS — no per-device config needed.
+  API = `${window.location.origin}${API_PREFIX}`;
 }
 
 // Bearer token for remote/exposed setups. Priority:
