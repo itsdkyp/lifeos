@@ -101,6 +101,8 @@ function parseGrowwMF(rows: any[][]): { imported: number; skipped: number; holdi
     // Some rows only have folio/units — skip those (they're summary continuation rows).
     const name  = r[0];
     const amc   = r[1];
+    const cat   = r[2];
+    const subcat= r[3];
     if (typeof name !== "string" || !name.trim()) { skipped++; continue; }
     const units    = num(r[6]);
     const invested = num(r[7]);
@@ -113,7 +115,7 @@ function parseGrowwMF(rows: any[][]): { imported: number; skipped: number; holdi
       cost_basis: invested / units,   // NAV at buy
       currency: "INR",
       manual_price: current && units ? current / units : undefined,
-      note: `Groww · ${amc ?? ""}`.trim(),
+      note: `Groww · ${amc ?? ""}${cat ? ` · ${cat}` : ""}${subcat ? ` · ${subcat}` : ""}`.trim().replace(/^Groww · \s*$/, "Groww"),
       imported_from: "groww_mf",
     });
   }

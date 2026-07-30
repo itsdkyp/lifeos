@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useProfile, currencySymbol } from "@/lib/profile";
+import { authFetch } from "@/lib/api";
 
 type Row = {
   key: string; label: string; value: number; pct: number;
@@ -22,7 +23,7 @@ export function AllocationGauge() {
   const { profile } = useProfile();
 
   useEffect(() => {
-    const load = () => fetch((process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787") + "/holdings/allocation")
+    const load = () => authFetch("/holdings/allocation")
       .then(r => r.json()).then(setData).catch(() => {});
     load();
     const id = setInterval(load, 60_000);

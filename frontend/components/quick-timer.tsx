@@ -18,34 +18,42 @@ export function QuickTimer({ active, onDone }: { active: Session | null; onDone:
   if (active) {
     const secs = (Date.now() - new Date(active.started_at).getTime()) / 1000;
     return (
-      <div className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <div>
-            <div className="text-sm font-medium">{active.label}</div>
-            <div className="text-xs text-muted-foreground">{active.category}</div>
-          </div>
-          <div className="text-3xl font-semibold tabular-nums">{fmt(secs)}</div>
+      <div className="space-y-6 flex flex-col items-center py-8">
+        <div className="text-center space-y-1">
+          <div className="text-xs font-semibold text-muted-foreground uppercase tracking-widest">{active.category}</div>
+          <div className="text-lg font-medium">{active.label}</div>
+        </div>
+        <div className="text-6xl sm:text-7xl font-semibold tabular-nums tracking-tighter text-primary">
+          {fmt(secs)}
         </div>
         <button onClick={async () => { await api.timeStop(); onDone(); }}
-          className="w-full rounded-md bg-destructive text-destructive-foreground text-sm font-medium py-2 flex items-center justify-center gap-2 hover:opacity-90">
-          <Square className="h-4 w-4" /> Stop
+          className="w-full max-w-[240px] rounded-full bg-destructive text-destructive-foreground text-sm font-medium py-3 flex items-center justify-center gap-2 hover:opacity-90 shadow-sm transition-transform active:scale-95">
+          <Square className="h-5 w-5" /> Stop
         </button>
       </div>
     );
   }
 
   return (
-    <div className="space-y-3">
-      <input value={label} onChange={e => setLabel(e.target.value)} placeholder="what are you doing?"
-        className="w-full rounded-md bg-secondary/50 border border-border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring" />
+    <div className="space-y-4 py-8 max-w-sm mx-auto">
+      <input value={label} onChange={e => setLabel(e.target.value)} placeholder="What are you doing?"
+        onKeyDown={e => {
+          if (e.key === "Enter" && label.trim()) {
+            api.timeStart(label, cat).then(() => {
+              setLabel("");
+              onDone();
+            });
+          }
+        }}
+        className="w-full bg-transparent border-b border-border/50 px-2 py-3 text-center text-lg outline-none focus:border-primary transition-colors placeholder:text-muted-foreground/50" />
       <select value={cat} onChange={e => setCat(e.target.value)}
-        className="w-full rounded-md bg-secondary/50 border border-border px-3 py-2 text-sm outline-none">
+        className="w-full rounded-md bg-secondary/30 border border-border px-3 py-3 text-sm outline-none cursor-pointer">
         <option>work</option><option>learning</option><option>exercise</option>
         <option>chores</option><option>personal</option>
       </select>
       <button onClick={async () => { if (!label.trim()) return; await api.timeStart(label, cat); setLabel(""); onDone(); }}
-        className="w-full rounded-md bg-primary text-primary-foreground text-sm font-medium py-2 flex items-center justify-center gap-2 hover:opacity-90">
-        <Play className="h-4 w-4" /> Start
+        className="w-full rounded-full bg-primary text-primary-foreground text-sm font-medium py-3 flex items-center justify-center gap-2 hover:opacity-90 shadow-sm transition-transform active:scale-95 mt-4">
+        <Play className="h-5 w-5" /> Start Stopwatch
       </button>
     </div>
   );

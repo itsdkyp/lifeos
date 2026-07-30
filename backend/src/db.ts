@@ -14,7 +14,17 @@ CREATE TABLE IF NOT EXISTS transactions (
   amount REAL NOT NULL,
   category TEXT NOT NULL,
   note TEXT,
-  kind TEXT NOT NULL CHECK(kind IN ('expense','income'))
+  kind TEXT NOT NULL CHECK(kind IN ('expense','income','transfer')),
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  to_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  type TEXT DEFAULT 'bank', -- bank, cash, credit_card, receivable, payable
+  currency TEXT DEFAULT 'USD',
+  initial_balance REAL DEFAULT 0,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS moods (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +47,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   due_date TEXT,
   done INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  done_at TEXT
+  done_at TEXT,
+  duration_minutes INTEGER DEFAULT 15,
+  google_event_id TEXT
 );
 CREATE TABLE IF NOT EXISTS sleep (
   day TEXT PRIMARY KEY,
@@ -81,10 +93,16 @@ CREATE TABLE IF NOT EXISTS mood2d (
   note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tx_ts   ON transactions(ts);
+CREATE INDEX IF NOT EXISTS idx_tx_kind_ts ON transactions(kind, ts);
+CREATE INDEX IF NOT EXISTS idx_tx_acc  ON transactions(account_id);
+CREATE INDEX IF NOT EXISTS idx_tx_to_acc ON transactions(to_account_id);
 CREATE INDEX IF NOT EXISTS idx_mood_ts ON moods(ts);
 CREATE INDEX IF NOT EXISTS idx_sess_st ON time_sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_sess_active ON time_sessions(ended_at) WHERE ended_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_due  ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks(done);
+CREATE INDEX IF NOT EXISTS idx_tasks_done_at ON tasks(done_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_gcal ON tasks(google_event_id);
 CREATE INDEX IF NOT EXISTS idx_hlog_day ON habit_logs(day);
 CREATE INDEX IF NOT EXISTS idx_wins_day ON wins(day);
 CREATE INDEX IF NOT EXISTS idx_grat_day ON gratitudes(day);
@@ -94,6 +112,11 @@ CREATE TABLE IF NOT EXISTS weight (
   day TEXT PRIMARY KEY,
   kg REAL NOT NULL,
   note TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS water (
+  day TEXT PRIMARY KEY,
+  ml INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meals (
@@ -117,6 +140,8 @@ CREATE TABLE IF NOT EXISTS holdings (
   imported_from TEXT,             -- e.g. 'groww_stocks' | 'groww_mf'
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_hold_symbol ON holdings(symbol);
+CREATE INDEX IF NOT EXISTS idx_hold_imported_from ON holdings(imported_from);
 
 CREATE TABLE IF NOT EXISTS profile (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -138,6 +163,7 @@ CREATE TABLE IF NOT EXISTS llm_config (
   model TEXT NOT NULL,
   base_url TEXT,
   auth_type TEXT NOT NULL DEFAULT 'api_key',   -- 'api_key' | 'oauth'
+  context_days INTEGER DEFAULT 30,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -151,15 +177,37 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 `);
 
 // Additive migrations: add columns to holdings if the DB was created earlier without them.
+const taskCols = (db.query("PRAGMA table_info(tasks)").all() as any[]).map(c => c.name);
+if (!taskCols.includes("is_important")) db.exec("ALTER TABLE tasks ADD COLUMN is_important INTEGER NOT NULL DEFAULT 0");
+if (!taskCols.includes("is_urgent"))    db.exec("ALTER TABLE tasks ADD COLUMN is_urgent INTEGER NOT NULL DEFAULT 0");
+if (!taskCols.includes("duration_minutes")) db.exec("ALTER TABLE tasks ADD COLUMN duration_minutes INTEGER DEFAULT 15");
+if (!taskCols.includes("google_event_id"))  db.exec("ALTER TABLE tasks ADD COLUMN google_event_id TEXT");
+if (!taskCols.includes("due_time"))         db.exec("ALTER TABLE tasks ADD COLUMN due_time TEXT");
+
+const mealCols = (db.query("PRAGMA table_info(meals)").all() as any[]).map(c => c.name);
+if (!mealCols.includes("meal_type")) db.exec("ALTER TABLE meals ADD COLUMN meal_type TEXT DEFAULT 'snack'");
 const holdingCols = (db.query("PRAGMA table_info(holdings)").all() as any[]).map(c => c.name);
 if (!holdingCols.includes("manual_price"))  db.exec("ALTER TABLE holdings ADD COLUMN manual_price REAL");
 if (!holdingCols.includes("imported_from")) db.exec("ALTER TABLE holdings ADD COLUMN imported_from TEXT");
 if (!holdingCols.includes("monthly_contribution"))     db.exec("ALTER TABLE holdings ADD COLUMN monthly_contribution REAL DEFAULT 0");
 if (!holdingCols.includes("contribution_last_applied")) db.exec("ALTER TABLE holdings ADD COLUMN contribution_last_applied TEXT");
 
+const txnCols = (db.query("PRAGMA table_info(transactions)").all() as any[]).map(c => c.name);
+if (!txnCols.includes("account_id")) db.exec("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL");
+if (!txnCols.includes("to_account_id")) db.exec("ALTER TABLE transactions ADD COLUMN to_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL");
+
+const llmCols = (db.query("PRAGMA table_info(llm_config)").all() as any[]).map(c => c.name);
+if (!llmCols.includes("context_days")) db.exec("ALTER TABLE llm_config ADD COLUMN context_days INTEGER DEFAULT 30");
+
+
 const profileCols = (db.query("PRAGMA table_info(profile)").all() as any[]).map(c => c.name);
 if (!profileCols.includes("vault_path"))     db.exec("ALTER TABLE profile ADD COLUMN vault_path TEXT");
 if (!profileCols.includes("journal_subdir")) db.exec("ALTER TABLE profile ADD COLUMN journal_subdir TEXT");
+if (!profileCols.includes("alias"))          db.exec("ALTER TABLE profile ADD COLUMN alias TEXT");
+if (!profileCols.includes("google_client_id")) db.exec("ALTER TABLE profile ADD COLUMN google_client_id TEXT");
+if (!profileCols.includes("google_client_secret")) db.exec("ALTER TABLE profile ADD COLUMN google_client_secret TEXT");
+if (!profileCols.includes("monthly_budget")) db.exec("ALTER TABLE profile ADD COLUMN monthly_budget REAL");
+if (!profileCols.includes("fixed_categories")) db.exec("ALTER TABLE profile ADD COLUMN fixed_categories TEXT DEFAULT '[]'");
 
 // Convenience wrappers
 export const q  = <T = any>(sql: string, ...args: any[]) => db.query(sql).all(...args) as T[];

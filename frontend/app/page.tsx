@@ -11,10 +11,54 @@ import { LivedCounter } from "@/components/lived-counter";
 import { ChatWidget } from "@/components/chat-widget";
 import { ActiveSession } from "@/components/active-session";
 
+const QUOTES = [
+  { text: "Atomic Habits", author: "James Clear", quote: "Motivation is unreliable. Behavior is driven by your environment. If you want to change a habit, change your physical cues." },
+  { text: "Deep Work", author: "Cal Newport", quote: "Network tools fragment your attention. Schedule block time for deep work, and treat it with the same respect as a meeting." },
+  { text: "Thinking, Fast and Slow", author: "Daniel Kahneman", quote: "Your brain defaults to the path of least resistance (System 1). Force System 2 thinking when evaluating major choices." },
+  { text: "Man's Search for Meaning", author: "Viktor E. Frankl", quote: "Between stimulus and response, there is a space. In that space is our power to choose our response." },
+  { text: "The Power of Habit", author: "Charles Duhigg", quote: "You cannot extinguish a bad habit, you can only change it. Keep the cue and reward, but insert a new routine." },
+  { text: "Flow", author: "Mihaly Csikszentmihalyi", quote: "To achieve flow, the challenge of the task must perfectly match your skill level. Too hard = anxiety; too easy = boredom." },
+  { text: "Drive", author: "Daniel H. Pink", quote: "True motivation comes from Autonomy, Mastery, and Purpose. Ensure your goals align with these three pillars." },
+  { text: "Essentialism", author: "Greg McKeown", quote: "If it isn't a clear yes, then it's a clear no. Protect your time ruthlessly." },
+  { text: "Mindset", author: "Carol S. Dweck", quote: "Stop praising intelligence or talent. Praise the process, the effort, and the strategy. This builds resilience." },
+  { text: "The 7 Habits of Highly Effective People", author: "Stephen R. Covey", quote: "Put first things first. Don't prioritize what's on your schedule; schedule your priorities." }
+];
+
+function DailyQuote() {
+  const [quote, setQuote] = useState(QUOTES[0]);
+
+  useEffect(() => {
+    const updateQuote = () => {
+      // Cycle every hour deterministically based on date and time
+      const hour = new Date().getHours();
+      const day = new Date().getDate();
+      const index = (day * 24 + hour) % QUOTES.length;
+      setQuote(QUOTES[index]);
+    };
+    updateQuote();
+    const id = setInterval(updateQuote, 60000); // Check every minute
+    return () => clearInterval(id);
+  }, []);
+
+  if (!quote) return null;
+
+  return (
+    <div className="rounded-2xl border border-border bg-card/40 px-6 py-5 backdrop-blur shadow-sm text-center flex flex-col items-center justify-center animate-in fade-in duration-1000">
+      <p className="text-sm font-medium italic text-muted-foreground/90 max-w-2xl leading-relaxed">
+        "{quote.quote}"
+      </p>
+      <div className="text-[10px] font-bold uppercase tracking-widest mt-3 text-primary/70">
+        — {quote.author}, {quote.text}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [today, setToday] = useState<Summary | null>(null);   // fixed: always today (rolling 7d for "week" avg)
   const [ranged, setRanged] = useState<Summary | null>(null); // range-driven averages
   const [stats, setStats] = useState<Stats | null>(null);
+  const [budget, setBudget] = useState<any>(null);
   const [range, setRange] = useState<number>(30);
   const { profile } = useProfile();
   const sym = currencySymbol(profile?.currency);
@@ -25,7 +69,10 @@ export default function Dashboard() {
 
   // Load "today" once + on tick (never range-dependent)
   useEffect(() => {
-    const load = () => api.summary(7).then(setToday).catch(() => {});
+    const load = () => {
+      api.summary(7).then(setToday).catch(() => {});
+      api.financeBudget().then(setBudget).catch(() => {});
+    };
     load();
     const id = setInterval(load, 30_000);
     return () => clearInterval(id);
@@ -38,93 +85,100 @@ export default function Dashboard() {
   }, [range]);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-8">
+    <div className="mx-auto max-w-7xl space-y-6 md:space-y-8">
       <Header firstName={displayName} alive={alive} age={age} goal={profile?.goal} />
-
       <ActiveSession />
 
-      {/* Today — always full-strength, no range dependency */}
-      <section className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Today</h2>
-          <div className="flex items-center gap-2">
-            <ChatWidget />
-            <span className="text-xs text-muted-foreground hidden sm:inline">
-              or <kbd className="rounded border border-border px-1.5 py-0.5">⌘K</kbd>
-            </span>
-          </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_320px] gap-6 md:gap-8">
+        
+        {/* Main Left Column */}
+        <div className="space-y-6 md:space-y-8 min-w-0">
+          
+          {/* Today */}
+          <section className="space-y-3">
+            <div className="flex items-baseline justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Today</h2>
+              <div className="flex items-center gap-2">
+                <ChatWidget onAction={() => {
+                  api.summary(7).then(setToday).catch(() => {});
+                  api.summary(range).then(setRanged).catch(() => {});
+                  api.stats(range).then(setStats).catch(() => {});
+                  api.financeBudget().then(setBudget).catch(() => {});
+                }} />
+                <span className="text-xs text-muted-foreground hidden sm:inline">
+                  or <kbd className="rounded border border-border px-1.5 py-0.5">⌘K</kbd>
+                </span>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <StatCard compact icon={Heart} label="Mood"
+                value={today?.mood.today != null ? today.mood.today.toFixed(1) : "—"}
+                sub={today?.mood.today == null ? "not logged" : "logged today"}
+                tone={today?.mood.today == null ? "default" : today.mood.today >= 7 ? "good" : today.mood.today >= 4 ? "default" : "warn"} />
+              <StatCard compact icon={Moon} label="Sleep"
+                value={today?.sleep.last?.hours != null ? `${today.sleep.last.hours}h` : "—"}
+                sub={today?.sleep.last?.day === today?.day ? "logged" : "log tonight"}
+                tone={today?.sleep.last?.hours == null ? "default" :
+                      profile?.sleep_target_hours && today.sleep.last.hours >= profile.sleep_target_hours ? "good" :
+                      today.sleep.last.hours >= 6 ? "default" : "warn"} />
+              <StatCard compact icon={Timer} label="Deep work"
+                value={`${today?.time.today ?? 0}h`}
+                sub="tracked today"
+                tone={(today?.time.today ?? 0) >= 6 ? "good" : (today?.time.today ?? 0) >= 3 ? "default" : "warn"} />
+              <StatCard compact icon={CheckSquare} label="Tasks"
+                value={`${today?.tasks.done_today ?? 0}/${(today?.tasks.done_today ?? 0) + (today?.tasks.open ?? 0)}`}
+                sub={today?.tasks.overdue ? `${today.tasks.overdue} overdue` : "on track"}
+                tone={today?.tasks.overdue ? "bad" : "default"} />
+
+              <StatCard compact icon={Wallet} label="Spent"
+                value={today ? `${sym}${today.spend.today.toFixed(0)}` : "—"}
+                sub={budget ? (budget.safe_to_spend_today < 0 ? "over budget" : "under budget") : "today only"}
+                tone={budget ? (budget.safe_to_spend_today < 0 ? "bad" : "good") : "default"} />
+              <StatCard compact icon={Apple} label="Calories"
+                value={today?.calories?.today ?? 0}
+                sub="today only"
+                tone={(today?.calories?.today ?? 0) > 2500 ? "warn" : "default"} />
+              <StatCard compact icon={Sparkles} label="Wins"
+                value={today?.positive.wins ?? 0}
+                sub="logged today"
+                tone={(today?.positive.wins ?? 0) > 0 ? "good" : "default"} />
+              <StatCard compact icon={Heart} label="Gratitude"
+                value={today?.positive.gratitude ?? 0}
+                sub="logged today"
+                tone={(today?.positive.gratitude ?? 0) > 0 ? "good" : "default"} />
+            </div>
+
+            <NudgeCard s={today} />
+          </section>
+
+          {/* Trend — range-driven */}
+          <section className="space-y-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-3">
+              <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Trend</h2>
+              <RangeToggle range={range} setRange={setRange} />
+            </div>
+
+            <Card className="p-0 overflow-hidden">
+              <StatsCharts stats={stats} />
+            </Card>
+          </section>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard icon={Heart} label="Mood"
-            value={today?.mood.today != null ? today.mood.today.toFixed(1) : "—"}
-            sub={today?.mood.latest != null
-              ? `avg today · latest ${today.mood.latest}${today.mood.latest_ts ? ` at ${new Date(today.mood.latest_ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
-              : "not logged yet"}
-            tone={today?.mood.today == null ? "default" : today.mood.today >= 7 ? "good" : today.mood.today >= 4 ? "default" : "warn"} />
-          <StatCard icon={Moon} label="Sleep"
-            value={today?.sleep.last?.hours != null ? `${today.sleep.last.hours}h` : "—"}
-            sub={today?.sleep.last?.day === today?.day
-              ? (profile?.sleep_target_hours ? `target ${profile.sleep_target_hours}h` : "logged")
-              : (today?.sleep.last?.day ? `last: ${today.sleep.last.day}` : "log tonight")}
-            tone={today?.sleep.last?.hours == null ? "default" :
-                  profile?.sleep_target_hours && today.sleep.last.hours >= profile.sleep_target_hours ? "good" :
-                  today.sleep.last.hours >= 6 ? "default" : "warn"} />
-          <StatCard icon={Timer} label="Deep work"
-            value={`${today?.time.today ?? 0}h`}
-            sub="tracked sessions"
-            tone={(today?.time.today ?? 0) >= 3 ? "good" : "default"} />
-          <StatCard icon={CheckSquare} label="Tasks"
-            value={`${today?.tasks.done_today ?? 0}/${(today?.tasks.done_today ?? 0) + (today?.tasks.open ?? 0)}`}
-            sub={today?.tasks.overdue ? `${today.tasks.overdue} overdue` : "on track"}
-            tone={today?.tasks.overdue ? "bad" : "default"} />
 
-          <StatCard icon={Wallet} label="Spent"
-            value={today ? `${sym}${today.spend.today.toFixed(2)}` : "—"}
-            sub="today only" />
-          <StatCard icon={Apple} label="Calories"
-            value={today?.calories?.today ?? 0}
-            sub="today only" />
-          <StatCard icon={Sparkles} label="Wins"
-            value={today?.positive.wins ?? 0}
-            sub="what did you do well?"
-            tone={(today?.positive.wins ?? 0) > 0 ? "good" : "default"} />
-          <StatCard icon={Heart} label="Gratitude"
-            value={today?.positive.gratitude ?? 0}
-            sub="one line is enough"
-            tone={(today?.positive.gratitude ?? 0) > 0 ? "good" : "default"} />
+        {/* Right Sidebar Column */}
+        <div className="space-y-6 min-w-0">
+          <DailyQuote />
+
+          <section className="space-y-3">
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Shortcuts</h2>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+              <ShortcutCard href="/journal" title="Reflect" body="Journal, wins, gratitude — the mind-clearing routine." />
+              <ShortcutCard href="/tasks" title="Tasks" body="Plan what to do next in your Eisenhower matrix." />
+              <ShortcutCard href="/time?mode=pomodoro" title="Deep Work" body="Start a Pomodoro or stopwatch timer." />
+            </div>
+          </section>
         </div>
-
-        <NudgeCard s={today} />
-      </section>
-
-      {/* Trend — range-driven */}
-      <section className="space-y-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-3">
-          <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Trend</h2>
-          <RangeToggle range={range} setRange={setRange} />
-        </div>
-
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <MiniStat label={`Spent (${rangeLabel(range)})`}
-            value={ranged ? `${sym}${ranged.spend.week.toFixed(0)}` : "—"} />
-          <MiniStat label={`Avg mood`}
-            value={ranged?.mood.week != null ? ranged.mood.week.toFixed(1) : "—"} />
-          <MiniStat label={`Avg sleep`}
-            value={ranged?.sleep.avg7 != null ? `${ranged.sleep.avg7.toFixed(1)}h` : "—"} />
-          <MiniStat label={`Weight change`}
-            value={ranged?.weight?.delta != null ? `${ranged.weight.delta > 0 ? "+" : ""}${ranged.weight.delta} kg` : "—"} />
-        </div>
-
-        <Card>
-          <StatsCharts stats={stats} />
-        </Card>
-      </section>
-
-      <section className="grid gap-4 md:grid-cols-3">
-        <ShortcutCard href="/journal" title="Reflect" body="Journal, wins, gratitude — the mind-clearing routine." />
-        <ShortcutCard href="/habits"  title="Habits"  body="Small things done often become identity." />
-        <ShortcutCard href="/review"  title="Weekly review" body="Sunday ritual: what happened, what's next." />
-      </section>
+      </div>
     </div>
   );
 }
@@ -172,7 +226,9 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
         </div>
       )}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-        <span className="flex items-center gap-1.5"><Sun className="h-3.5 w-3.5" /> {dateStr}</span>
+        <span suppressHydrationWarning className="flex items-center gap-1.5">
+          <Sun className="h-3.5 w-3.5" /> {mounted ? dateStr : ""}
+        </span>
         {mounted && (alive != null ? <LivedCounterWrap /> :
           <Link href="/settings" className="underline underline-offset-2 hover:text-foreground">Set your DOB in Settings for the lived counter</Link>
         )}

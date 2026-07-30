@@ -63,10 +63,18 @@ const copilotSessions = new Map<string, {
   domain: string;
 }>();
 
+// SSRF guard: only allow github.com and .ghe.com (GitHub Enterprise) subdomains.
+function validateCopilotDomain(input?: string): string {
+  const domain = (input || "github.com").toLowerCase().trim();
+  if (domain === "github.com") return domain;
+  if (/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ghe\.com$/.test(domain)) return domain;
+  throw new Error(`Rejected enterprise domain "${domain}". Only github.com or *.ghe.com is allowed.`);
+}
+
 export async function copilotStartDevice(enterpriseDomain?: string): Promise<{
   user_code: string; verification_uri: string; device_code: string; interval: number; expires_in: number;
 }> {
-  const domain = enterpriseDomain || "github.com";
+  const domain = validateCopilotDomain(enterpriseDomain);
   const r = await fetch(`https://${domain}/login/device/code`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "GitHubCopilotChat/0.35.0" },
@@ -108,7 +116,7 @@ export async function copilotPollDevice(device_code: string): Promise<{ status: 
 }
 
 async function copilotRefresh(githubToken: string, enterpriseDomain?: string): Promise<{ access_token: string; base_url: string; expires_at: number }> {
-  const domain = enterpriseDomain || "github.com";
+  const domain = validateCopilotDomain(enterpriseDomain);
   const r = await fetch(`https://api.${domain}/copilot_internal/v2/token`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${githubToken}`, ...COPILOT_HEADERS },
   });
@@ -185,8 +193,120 @@ export async function copilotEnableModel(modelId: string): Promise<boolean> {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  Anthropic Claude Pro/Max — PKCE + local callback
+//  Google Calendar — Authorization Code Flow (Stored in DB)
 // ══════════════════════════════════════════════════════════════════════
+export async function googleExchangeCode(code: string, redirect_uri: string) {
+  const p = q1<{ google_client_id: string; google_client_secret: string }>("SELECT google_client_id, google_client_secret FROM profile WHERE id=1");
+  if (!p?.google_client_id || !p?.google_client_secret) throw new Error("Google Client ID/Secret not configured in settings.");
+
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: p.google_client_id,
+      client_secret: p.google_client_secret,
+      code,
+      redirect_uri,
+    }),
+  });
+  if (!r.ok) throw new Error(`google token exchange failed: ${r.status} ${await r.text()}`);
+  const d = await r.json() as any;
+  saveToken("google", {
+    refresh_token: d.refresh_token, // Provided because access_type=offline
+    access_token: d.access_token,
+    expires_at: Date.now() + d.expires_in * 1000 - 5 * 60 * 1000,
+    meta: null,
+  });
+}
+
+async function refreshGoogle(refresh: string) {
+  const p = q1<{ google_client_id: string; google_client_secret: string }>("SELECT google_client_id, google_client_secret FROM profile WHERE id=1");
+  if (!p?.google_client_id || !p?.google_client_secret) throw new Error("Google Client ID/Secret missing.");
+
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({ 
+      grant_type: "refresh_token", 
+      client_id: p.google_client_id, 
+      client_secret: p.google_client_secret,
+      refresh_token: refresh 
+    }),
+  });
+  if (!r.ok) throw new Error(`google refresh failed: ${r.status}`);
+  const d = await r.json() as any;
+  saveToken("google", {
+    access_token: d.access_token,
+    expires_at: Date.now() + d.expires_in * 1000 - 5 * 60 * 1000,
+  });
+  return d.access_token as string;
+}
+
+export async function createGoogleTask(title: string, dateIso: string, notes?: string): Promise<string> {
+  const token = await googleGetAccessToken();
+  
+  // Create task due on the given day
+  const due = new Date(`${dateIso}T00:00:00.000Z`);
+
+  const r = await fetch("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      title: title,
+      notes: notes || "",
+      due: due.toISOString(),
+    }),
+  });
+  if (!r.ok) throw new Error(`Google Tasks create failed: ${r.status} ${await r.text()}`);
+  const d = await r.json() as any;
+  return d.id;
+}
+
+export async function markGoogleTaskDone(taskId: string) {
+  const token = await googleGetAccessToken();
+  
+  const rPatch = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/${taskId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      status: "completed"
+    }),
+  });
+  if (!rPatch.ok) throw new Error(`Google Tasks patch failed: ${rPatch.status} ${await rPatch.text()}`);
+}
+
+export async function updateGoogleTask(taskId: string, patch: { title?: string; notes?: string; due?: string | null }) {
+  const token = await googleGetAccessToken();
+  const body: any = {};
+  if (patch.title !== undefined) body.title = patch.title;
+  if (patch.notes !== undefined) body.notes = patch.notes;
+  if (patch.due !== undefined) body.due = patch.due ? new Date(`${patch.due}T00:00:00.000Z`).toISOString() : null;
+
+  const rPatch = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/${taskId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!rPatch.ok) throw new Error(`Google Tasks update failed: ${rPatch.status} ${await rPatch.text()}`);
+}
+
+export async function googleGetAccessToken(): Promise<string> {
+  const t = getToken("google");
+  if (!t?.access_token && !t?.refresh_token) throw new Error("Not signed in to Google");
+  if (t.access_token && t.expires_at && Date.now() < t.expires_at) return t.access_token;
+  if (!t.refresh_token) throw new Error("Google refresh token missing. Please sign in again.");
+  return refreshGoogle(t.refresh_token);
+}
 const ANTHROPIC_CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const ANTHROPIC_AUTHORIZE = "https://claude.ai/oauth/authorize";
 const ANTHROPIC_TOKEN     = "https://platform.claude.com/v1/oauth/token";
@@ -213,7 +333,10 @@ export function anthropicStart(): { auth_url: string; redirect_uri: string } {
   if (anthropicFlow?.server) { try { anthropicFlow.server.close(); } catch {} }
 
   const { verifier, challenge } = pkce();
-  const state = verifier;
+  // PKCE: `state` (CSRF token, sent through browser) MUST be different from `verifier`
+  // (secret, sent only through the back channel to prove we started the flow).
+  // Using verifier as state defeats PKCE entirely.
+  const state = base64url(randomBytes(32));
 
   const flow: AnthropicFlow = { verifier, state, server: null, code: null, error: null, exchanged: false };
   anthropicFlow = flow;
@@ -297,7 +420,7 @@ async function exchangeAnthropicCode(code: string, verifier: string) {
     body: JSON.stringify({
       grant_type: "authorization_code",
       client_id: ANTHROPIC_CLIENT_ID,
-      code, state: verifier,
+      code,
       redirect_uri: REDIRECT_URI,
       code_verifier: verifier,
     }),

@@ -2,8 +2,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, BookHeart, CheckSquare, Repeat, Wallet, Timer, Sparkles, MessageSquare, Focus, Plus, Settings, Scale, Apple, TrendingUp, Sun, Moon } from "lucide-react";
+import { LayoutDashboard, BookHeart, CheckSquare, Repeat, Wallet, Timer, Sparkles, MessageSquare, Focus, Plus, Settings, Scale, Apple, TrendingUp, Sun, Moon, LineChart, Landmark, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import { CommandPalette } from "./command-palette";
 import { ProfileProvider, useProfile } from "@/lib/profile";
 import { OnboardingModal } from "./onboarding";
@@ -19,21 +20,19 @@ const sections: Section[] = [
     { href: "/habits",  label: "Habits",  icon: Repeat },
   ] },
   { label: "Time",   href: "/time",   icon: Timer,  items: [
-    { href: "/time",    label: "Sessions",    icon: Timer },
-    { href: "/focus",   label: "Focus",       icon: Focus },
+    { href: "/time",    label: "Time & Focus",    icon: Timer },
   ] },
   { label: "Money",  href: "/money",  icon: Wallet, items: [
     { href: "/money",   label: "Overview",    icon: Wallet },
+    { href: "/accounts",label: "Accounts",    icon: Landmark },
     { href: "/finance", label: "Expenses",    icon: Wallet },
     { href: "/invest",  label: "Investments", icon: TrendingUp },
   ] },
-  { label: "Health", href: "/health", icon: Apple, items: [
-    { href: "/health",  label: "Overview",    icon: Apple },
-    { href: "/meals",   label: "Meals",       icon: Apple },
-    { href: "/weight",  label: "Weight",      icon: Scale },
+  { label: "Health", href: "/health", icon: Activity, items: [
+    { href: "/health",  label: "Health & Body",    icon: Activity },
   ] },
   { items: [
-    { href: "/review",  label: "Review",   icon: Sparkles },
+    { href: "/insights",label: "Insights", icon: LineChart },
     { href: "/chat",    label: "Chat",     icon: MessageSquare },
     { href: "/settings",label: "Settings", icon: Settings },
   ] },
@@ -59,7 +58,11 @@ function ShellInner({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const check = async () => {
-      try { const a = await (await fetch((process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787") + "/time/active", { cache: "no-store" })).json(); setTimerActive(!!a && !a.ended_at && a.id); } catch {}
+      try {
+        // Reuse the shared helper so we pick up the auth token if configured.
+        const a = await api.timeActive();
+        setTimerActive(Boolean(a && !a.ended_at && a.id));
+      } catch {}
     };
     check();
     const id = setInterval(check, 10_000);
@@ -77,10 +80,10 @@ function ShellInner({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex flex-col md:flex-row min-h-screen">
       {/* Sidebar (md+) */}
-      <aside className="hidden md:flex md:flex-col w-56 shrink-0 border-r border-border bg-card/40 backdrop-blur px-3 py-6 gap-1">
+      <aside className="hidden md:flex md:flex-col w-56 shrink-0 border-r border-border bg-card/40 backdrop-blur px-3 py-6 gap-1 sticky top-0 h-screen overflow-y-auto">
         <div className="px-3 pb-6 flex items-center justify-between">
           <div>
-            <div className="text-lg font-semibold tracking-tight">LifeOS</div>
+            <div className="text-lg font-semibold tracking-tight flex items-baseline">LifeOS<span className="text-blue-500 font-black text-2xl leading-none">.</span></div>
             <div className="text-xs text-muted-foreground">your life, tracked</div>
           </div>
           <ThemeIcon />

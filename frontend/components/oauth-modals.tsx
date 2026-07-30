@@ -143,3 +143,141 @@ function Modal({ children, onClose, title }: { children: React.ReactNode; onClos
     </div>
   );
 }
+
+export function GoogleSignIn({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [state, setState] = useState<"idle" | "waiting" | "done" | "error">("idle");
+  const [err, setErr] = useState("");
+  
+  useEffect(() => {
+    // Attempt to read from profile if it's there
+    api.profileGet().then(p => {
+      if (p?.google_client_id) setClientId(p.google_client_id);
+      if (p?.google_client_secret) setClientSecret(p.google_client_secret);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      
+      const { type, code, error } = event.data;
+      if (type === "google-oauth-error") {
+        setState("error");
+        setErr(error ?? "Authentication failed.");
+      } else if (type === "google-oauth-code") {
+        try {
+          setState("done");
+          const redirectUri = `${window.location.origin}/callback/google`;
+          await api.googleExchangeCode(code, redirectUri);
+          onSuccess();
+          onClose();
+        } catch (e: any) {
+          setState("error");
+          setErr(String(e.message ?? e));
+        }
+      }
+    };
+    
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [onClose, onSuccess]);
+
+  async function startFlow() {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setErr("Please enter both Client ID and Client Secret.");
+      setState("error");
+      return;
+    }
+    
+    // Save to profile so backend can use it for exchange and future refreshes
+    try {
+      const p = await api.profileGet();
+      if (p) {
+        await api.profileSave({ ...p, google_client_id: clientId.trim(), google_client_secret: clientSecret.trim() });
+      }
+    } catch (e) {
+      setErr("Failed to save credentials.");
+      setState("error");
+      return;
+    }
+    
+    const params = new URLSearchParams({
+      client_id: clientId.trim(),
+      redirect_uri: `${window.location.origin}/callback/google`,
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/gmail.readonly",
+      prompt: "consent",
+      access_type: "offline",
+    });
+    
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+    window.open(url, "GoogleAuth", "width=500,height=600");
+    setState("waiting");
+    setErr("");
+  }
+
+  return (
+    <Modal onClose={onClose} title="Sign in with Google">
+      {state === "error" && <div className="text-sm text-destructive mb-4 bg-destructive/10 p-3 rounded-md">{err}</div>}
+      
+      {state === "waiting" || state === "done" ? (
+        <div className="space-y-4 text-center py-4">
+          <p className="text-sm text-muted-foreground">
+            A popup window has been opened for Google authentication.
+          </p>
+          <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+            {state === "waiting" ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Waiting for authorization…</>
+                                 : <><CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> Signed in ✓</>}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Provide your Google OAuth Client ID and Secret to enable permanent background sync (via Refresh Token).
+          </p>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Google Client ID</label>
+              <input 
+                value={clientId} 
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="e.g. 123456789-abc.apps.googleusercontent.com"
+                className="w-full rounded-md bg-secondary/50 border border-border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Google Client Secret</label>
+              <input 
+                value={clientSecret} 
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder="e.g. GOCSPX-1234567890abcdef"
+                type="password"
+                className="w-full rounded-md bg-secondary/50 border border-border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+          </div>
+          <div className="text-[10px] text-muted-foreground bg-secondary/30 p-2 rounded-md">
+            <b>Setup Instructions:</b>
+            <ol className="list-decimal pl-4 mt-1 space-y-1">
+              <li>Go to Google Cloud Console and create a project.</li>
+              <li>Enable the Google Calendar API.</li>
+              <li>Go to <b>OAuth consent screen</b>, set to External, and add your email under <b>Test users</b>.</li>
+              <li>Create OAuth Credentials (Web application).</li>
+              <li>Add this exact URL to <b>Authorized redirect URIs</b>:<br/>
+                <code className="bg-secondary/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground select-all mt-1 inline-block">{typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'}/callback/google</code>
+              </li>
+            </ol>
+          </div>
+          <button 
+            onClick={startFlow}
+            className="w-full rounded-md bg-primary text-primary-foreground px-4 py-2 text-sm font-medium hover:opacity-90"
+          >
+            Connect Calendar (Permanent)
+          </button>
+        </div>
+      )}
+    </Modal>
+  );
+}

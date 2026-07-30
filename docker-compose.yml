@@ -4,59 +4,46 @@ services:
     image: lifeos-backend
     container_name: lifeos-backend
     restart: unless-stopped
-    ports: ["8787:8787"]
+    ports: ["${BACKEND_PORT:-8787}:8787"]
     environment:
       PORT: 8787
       DB_PATH: /data/lifeos.db
+      # LIFEOS_BIND=0.0.0.0 inside the container is fine — the host port mapping is what
+      # actually decides whether the outside world can reach it. Bearer-token auth is
+      # what protects the API when the port IS exposed.
+      LIFEOS_BIND: 0.0.0.0
+      # REQUIRED when you publish port 8787 or use a reverse proxy. Generate:
+      #   openssl rand -hex 32
+      # Then set LIFEOS_TOKEN in a .env file next to this compose file.
+      LIFEOS_TOKEN: ${LIFEOS_TOKEN:-}
+      # CORS: origins the frontend can use. Add tunnel hostnames here.
+      LIFEOS_CORS_ORIGIN: ${LIFEOS_CORS_ORIGIN:-http://localhost:3000}
+      # Obsidian vault path INSIDE the container. The volume below maps host -> here.
       VAULT_PATH: /vault
       JOURNAL_SUBDIR: ${JOURNAL_SUBDIR:-Journal}
-      LLM_PROXY_URL: ${LLM_PROXY_URL:-http://llm-proxy:4000}
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-copilot-sonnet}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
     volumes:
-      # SQLite DB persists across container recreates
+      # SQLite DB persists across container recreates.
       - lifeos-data:/data
-      # Obsidian vault — bind-mount so notes stay on host
-      - ${VAULT_PATH:-~/Obsidian}:/vault
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      # Obsidian vault — bind-mount so notes stay on the host. Set VAULT_PATH in the .env
+      # file next to this compose. Leave unset (or set to an empty dir) if you don't use Obsidian.
+      - ${VAULT_PATH:-./.no-vault}:/vault
 
   frontend:
     build:
       context: ./frontend
       args:
-        # Backend URL as seen from the browser (host, not container).
+        # Backend URL as seen from the BROWSER, not the container. If you access LifeOS at
+        # http://YOUR-HOST:3000, this needs to be http://YOUR-HOST:8787 (or wherever the
+        # backend is reachable). For same-host use, http://localhost:8787 is fine.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8787}
+        # Optional: bake the token in at build time so browsers don't have to paste it.
+        # Skip this and paste per-browser in Settings -> Security if you prefer flexibility.
+        NEXT_PUBLIC_LIFEOS_TOKEN: ${NEXT_PUBLIC_LIFEOS_TOKEN:-}
     image: lifeos-frontend
     container_name: lifeos-frontend
     restart: unless-stopped
-    ports: ["3000:3000"]
+    ports: ["${FRONTEND_PORT:-3000}:3000"]
     depends_on: [backend]
-
-  # Optional: LiteLLM proxy — only needed if you route LLMs through it
-  # (e.g. GitHub Copilot pre-in-app-OAuth path).
-  llm-proxy:
-    image: ghcr.io/berriai/litellm:main-latest
-    container_name: lifeos-llm-proxy
-    profiles: ["proxy"]     # docker compose --profile proxy up
-    restart: unless-stopped
-    command: ["--config", "/config/config.yaml", "--port", "4000"]
-    ports: ["4000:4000"]
-    volumes:
-      - ./llm-proxy/config.yaml:/config/config.yaml:ro
-      - litellm-tokens:/root/.config/litellm
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
 
 volumes:
   lifeos-data:      # SQLite database
-  litellm-tokens:   # cached Copilot / provider tokens

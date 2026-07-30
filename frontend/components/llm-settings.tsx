@@ -3,21 +3,21 @@ import { useEffect, useState } from "react";
 import { api, type LLMConfig } from "@/lib/api";
 import { Card } from "@/components/card";
 import { CheckCircle2, XCircle, Loader2, ExternalLink, LogIn, LogOut } from "lucide-react";
-import { CopilotSignIn, AnthropicSignIn } from "./oauth-modals";
+import { CopilotSignIn, AnthropicSignIn, GoogleSignIn } from "./oauth-modals";
 
 type Provider = { id: string; label: string; baseUrl: string; defaultModel: string; needsKey: boolean };
 
 export function LLMSettings() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [cfg, setCfg] = useState<LLMConfig | null>(null);
-  const [form, setForm] = useState<{ provider: string; api_key: string; model: string; base_url: string; auth_type: "api_key" | "oauth" }>({
-    provider: "openai", api_key: "", model: "", base_url: "", auth_type: "api_key",
+  const [form, setForm] = useState<{ provider: string; api_key: string; model: string; base_url: string; auth_type: "api_key" | "oauth"; context_days: number }>({
+    provider: "openai", api_key: "", model: "", base_url: "", auth_type: "api_key", context_days: 30
   });
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "err">("idle");
   const [testMsg, setTestMsg] = useState("");
-  const [authStatus, setAuthStatus] = useState<{ github_copilot: boolean; anthropic: boolean }>({ github_copilot: false, anthropic: false });
-  const [oauthModal, setOauthModal] = useState<"copilot" | "anthropic" | null>(null);
+  const [authStatus, setAuthStatus] = useState<{ github_copilot: boolean; anthropic: boolean; google: boolean }>({ github_copilot: false, anthropic: false, google: false });
+  const [oauthModal, setOauthModal] = useState<"copilot" | "anthropic" | "google" | null>(null);
 
   const refreshAuth = () => api.authStatus().then(setAuthStatus).catch(() => {});
 
@@ -25,7 +25,7 @@ export function LLMSettings() {
     api.llmProviders().then(setProviders).catch(() => {});
     api.llmConfig().then(c => {
       setCfg(c);
-      if (c) setForm({ provider: c.provider, api_key: "", model: c.model, base_url: c.base_url ?? "", auth_type: (c as any).auth_type ?? "api_key" });
+      if (c) setForm({ provider: c.provider, api_key: "", model: c.model, base_url: c.base_url ?? "", auth_type: (c as any).auth_type ?? "api_key", context_days: (c as any).context_days ?? 30 });
     }).catch(() => {});
     refreshAuth();
   }, []);
@@ -52,7 +52,7 @@ export function LLMSettings() {
   async function save() {
     setStatus("saving");
     try {
-      const payload: any = { provider: form.provider, model: form.model, base_url: form.base_url || null, auth_type: form.auth_type };
+      const payload: any = { provider: form.provider, model: form.model, base_url: form.base_url || null, auth_type: form.auth_type, context_days: form.context_days };
       if (form.api_key) payload.api_key = form.api_key;
       await api.llmSave(payload);
       const c = await api.llmConfig(); setCfg(c);
@@ -137,12 +137,33 @@ export function LLMSettings() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <Field label="Model">
-            <input value={form.model} onChange={e => setForm({ ...form, model: e.target.value })}
-              placeholder={selected?.defaultModel} className={inputCls} />
+            {form.provider === "gemini" ? (
+              <>
+                <input list="gemini-models" value={form.model} onChange={e => setForm({ ...form, model: e.target.value })}
+                  placeholder={selected?.defaultModel} className={inputCls} />
+                <datalist id="gemini-models">
+                  <option value="gemini-3.6-flash" />
+                  <option value="gemini-3.5-flash" />
+                  <option value="gemini-3.5-flash-lite" />
+                  <option value="gemini-3.1-pro" />
+                  <option value="gemini-3-flash" />
+                  <option value="gemini-3.1-flash-live" />
+                  <option value="gemini-omni-flash" />
+                  <option value="gemini-2.5-flash" />
+                </datalist>
+              </>
+            ) : (
+              <input value={form.model} onChange={e => setForm({ ...form, model: e.target.value })}
+                placeholder={selected?.defaultModel} className={inputCls} />
+            )}
           </Field>
           <Field label="Base URL" hint="override (ollama, self-hosted, custom)">
             <input value={form.base_url} onChange={e => setForm({ ...form, base_url: e.target.value })}
               placeholder={selected?.baseUrl} className={inputCls} />
+          </Field>
+          <Field label="Context Window (Days)" hint="amount of history sent to LLM">
+            <input type="number" min="1" max="365" value={form.context_days} onChange={e => setForm({ ...form, context_days: parseInt(e.target.value) || 30 })}
+              className={inputCls} />
           </Field>
         </div>
 
@@ -185,6 +206,33 @@ export function LLMSettings() {
 
       {oauthModal === "copilot"   && <CopilotSignIn   onClose={() => { setOauthModal(null); refreshAuth(); }} onSuccess={refreshAuth} />}
       {oauthModal === "anthropic" && <AnthropicSignIn onClose={() => { setOauthModal(null); refreshAuth(); }} onSuccess={refreshAuth} />}
+
+      <div className="pt-6 mt-6 border-t border-border">
+        <h3 className="text-sm font-semibold mb-2">Integrations</h3>
+        <p className="text-xs text-muted-foreground mb-4">Connect external services to sync data.</p>
+        
+        <div className="rounded-md border border-border bg-secondary/30 p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-xs">
+              <div className="font-medium mb-1">Google Calendar</div>
+              {authStatus.google ? <span className="text-emerald-500 flex items-center gap-1"><CheckCircle2 className="h-3.5 w-3.5" /> Connected (Permanent)</span>
+                                 : <span className="text-muted-foreground">Sync events via OAuth (requires Client ID & Secret)</span>}
+            </div>
+            {authStatus.google ? (
+              <button onClick={async () => { await api.authLogout("google"); refreshAuth(); }}
+                className="rounded-md bg-secondary/50 hover:bg-secondary px-3 py-1.5 text-xs flex items-center gap-1 shrink-0">
+                <LogOut className="h-3.5 w-3.5" /> Disconnect
+              </button>
+            ) : (
+              <button onClick={() => setOauthModal("google")}
+                className="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-xs flex items-center gap-1 shrink-0">
+                <LogIn className="h-3.5 w-3.5" /> Connect
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      {oauthModal === "google" && <GoogleSignIn onClose={() => { setOauthModal(null); refreshAuth(); }} onSuccess={refreshAuth} />}
     </Card>
   );
 }

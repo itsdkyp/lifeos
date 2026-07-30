@@ -1,9 +1,48 @@
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+let API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+
+if (typeof window !== "undefined") {
+  // Automatically point to the same host that is serving the frontend, but on port 8787
+  // This allows the app to work seamlessly from phones or other devices on the local network.
+  API = `${window.location.protocol}//${window.location.hostname}:8787`;
+}
+
+// Bearer token for remote/exposed setups. Priority:
+//   1. localStorage "lifeos_token" — set via Settings, editable at runtime.
+//   2. NEXT_PUBLIC_LIFEOS_TOKEN env — baked at build time, for self-hosted flows.
+export function getAuthToken(): string | null {
+  if (typeof window !== "undefined") {
+    try {
+      const stored = window.localStorage.getItem("lifeos_token");
+      if (stored) return stored;
+    } catch {}
+  }
+  return process.env.NEXT_PUBLIC_LIFEOS_TOKEN ?? null;
+}
+
+export function setAuthToken(token: string | null) {
+  if (typeof window === "undefined") return;
+  if (token) window.localStorage.setItem("lifeos_token", token);
+  else window.localStorage.removeItem("lifeos_token");
+}
+
+// Public helper for streaming/multipart calls that can't go through req().
+export function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const token = getAuthToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(`${API}${path}`, { ...init, headers });
+}
+
+export function apiBase(): string { return API; }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken();
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   const r = await fetch(`${API}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers,
     cache: "no-store",
   });
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
@@ -17,22 +56,56 @@ export const api = {
     req(`/journal/${day}`, { method: "POST", body: JSON.stringify({ content }) }),
   logMood: (score: number, note = "") =>
     req(`/mood`, { method: "POST", body: JSON.stringify({ score, note }) }),
-  addTxn: (t: { amount: number; category: string; note?: string; kind?: "expense" | "income" }) =>
+  addTxn: (t: { amount: number; category: string; note?: string; kind?: "expense" | "income" | "transfer"; account_id?: number | null; to_account_id?: number | null }) =>
     req(`/finance`, { method: "POST", body: JSON.stringify(t) }),
   finance: (days = 30) => req<Txn[]>(`/finance?days=${days}`),
+  financeBudget: () => req<{ budget: number; total_discretionary: number; total_fixed: number; safe_daily_base: number; safe_to_spend_today: number; days_in_month: number; days_remaining: number; } | null>(`/finance/budget`),
   txnDelete: (id: number) => req(`/finance/${id}`, { method: "DELETE" }),
+  
+  accounts: () => req<{ accounts: Account[]; grand?: { currency: string; value: number } | null; fx_ok?: boolean }>(`/accounts`),
+  accountAdd: (a: { name: string; type: "bank" | "cash" | "credit_card" | "receivable" | "payable"; currency: string; initial_balance: number; funding_account_id?: number | null }) =>
+    req(`/accounts`, { method: "POST", body: JSON.stringify(a) }),
+  accountPatch: (id: number, patch: Partial<{ name: string; type: "bank" | "cash" | "credit_card" | "receivable" | "payable"; currency: string; initial_balance: number }>) =>
+    req(`/accounts/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  accountDelete: (id: number) => req(`/accounts/${id}`, { method: "DELETE" }),
   timeActive: () => req<Session | null>(`/time/active`),
   timeStart: (label: string, category = "work") =>
     req(`/time/start`, { method: "POST", body: JSON.stringify({ label, category }) }),
   timeStop:  () => req(`/time/stop`, { method: "POST" }),
+  timeLog:   (label: string, duration_seconds: number, category?: string) =>
+    req(`/time/log`, { method: "POST", body: JSON.stringify({ label, duration_seconds, category }) }),
   timeAll:   (days = 30) => req<Session[]>(`/time?days=${days}`),
-  chat: (q: string, model?: string) =>
-    req<{ answer: string }>(`/chat`, { method: "POST", body: JSON.stringify({ q, model }) }),
+  chat: (q: string, model?: string, onChunk?: (t: string) => void) => {
+    if (!onChunk) return req<{ answer: string }>(`/chat`, { method: "POST", body: JSON.stringify({ q, model }) });
+    return authFetch(`/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, model, stream: true }) })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text());
+        const contentType = r.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+           const j = await r.json();
+           if (j.answer) onChunk(j.answer);
+           return j as { answer: string };
+        }
+        const reader = r.body!.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          full += chunk;
+          onChunk(chunk);
+        }
+        return { answer: full };
+      });
+  },
   calendar: (month: string) => req<{ day: string; preview: string }[]>(`/calendar/${month}`),
+  googleCalendar: () => req<{ id: string; title: string; date: string; type: "event" | "task"; done?: boolean }[]>(`/calendar/google`),
   tasks:      (filter: "open" | "done" | "all" = "open") => req<Task[]>(`/tasks?filter=${filter}`),
-  taskAdd:    (t: { title: string; notes?: string; priority?: 1 | 2 | 3; due_date?: string }) =>
+  taskAdd:    (t: { title: string; notes?: string; priority?: 1 | 2 | 3; due_date?: string; due_time?: string; is_important?: boolean; is_urgent?: boolean; duration_minutes?: number }) =>
     req(`/tasks`, { method: "POST", body: JSON.stringify(t) }),
-  taskPatch:  (id: number, patch: Partial<{ title: string; notes: string; priority: 1 | 2 | 3; due_date: string | null; done: boolean }>) =>
+  taskSync:   () => req<{ updated: number; imported: number }>(`/tasks/sync`, { method: "POST" }),
+  taskPatch:  (id: number, patch: Partial<{ title: string; notes: string; priority: 1 | 2 | 3; due_date: string | null; due_time: string | null; done: boolean; is_important: boolean; is_urgent: boolean }>) =>
     req(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   taskDelete: (id: number) => req(`/tasks/${id}`, { method: "DELETE" }),
 
@@ -69,11 +142,11 @@ export const api = {
 
   llmProviders: () => req<{ id: string; label: string; baseUrl: string; defaultModel: string; needsKey: boolean }[]>(`/llm/providers`),
   llmConfig:    () => req<LLMConfig | null>(`/llm/config`),
-  llmSave:      (c: { provider: string; api_key?: string; model: string; base_url?: string | null }) =>
+  llmSave:      (c: { provider: string; api_key?: string; model: string; base_url?: string | null; auth_type?: "api_key" | "oauth"; context_days?: number }) =>
     req(`/llm/config`, { method: "PUT", body: JSON.stringify(c) }),
   llmTest:      () => req<{ ok: boolean; reply?: string; error?: string }>(`/llm/test`, { method: "POST" }),
 
-  authStatus:      () => req<{ github_copilot: boolean; anthropic: boolean }>(`/auth/status`),
+  authStatus:      () => req<{ github_copilot: boolean; anthropic: boolean; google: boolean }>(`/auth/status`),
   copilotStart:    (enterpriseDomain?: string) =>
     req<{ user_code: string; verification_uri: string; device_code: string; interval: number; expires_in: number }>(
       `/auth/copilot/start`, { method: "POST", body: JSON.stringify({ enterpriseDomain }) }),
@@ -85,7 +158,9 @@ export const api = {
     `/auth/anthropic/poll`, { method: "POST" }),
   anthropicManual: (input: string) => req<{ status: "complete" | "failed"; error?: string }>(
     `/auth/anthropic/manual`, { method: "POST", body: JSON.stringify({ input }) }),
-  authLogout:      (provider: "github_copilot" | "anthropic") =>
+  googleExchangeCode: (code: string, redirect_uri: string) => 
+    req(`/auth/google/exchange`, { method: "POST", body: JSON.stringify({ code, redirect_uri }) }),
+  authLogout:      (provider: "github_copilot" | "anthropic" | "google") =>
     req(`/auth/${provider}/logout`, { method: "POST" }),
 
   profileGet:  () => req<Profile | null>(`/profile`),
@@ -96,41 +171,91 @@ export const api = {
     req(`/weight`, { method: "POST", body: JSON.stringify({ kg, day, note }) }),
   weightDelete: (day: string) => req(`/weight/${day}`, { method: "DELETE" }),
 
+  waterAdd: (ml: number, day?: string) =>
+    req(`/water`, { method: "POST", body: JSON.stringify({ ml, day }) }),
+
   mealsForDay: (day: string) => req<Meal[]>(`/meals?day=${day}`),
   mealsDaily:  (days = 30) => req<{ d: string; kcal: number; p: number; c: number; f: number }[]>(`/meals/daily?days=${days}`),
-  mealAdd:     (m: { name: string; kcal: number; protein_g?: number; carbs_g?: number; fat_g?: number; note?: string }) =>
+  mealAdd:     (m: { name: string; kcal: number; protein_g?: number; carbs_g?: number; fat_g?: number; note?: string; meal_type?: string }) =>
     req(`/meals`, { method: "POST", body: JSON.stringify(m) }),
+  mealEstimate: (text: string) => req<{ ok: boolean; data: { kcal: number; protein_g: number; carbs_g: number; fat_g: number } }>(`/meals/estimate`, { method: "POST", body: JSON.stringify({ text }) }),
   mealDelete:  (id: number) => req(`/meals/${id}`, { method: "DELETE" }),
 
-  holdings:      () => req<HoldingsResp>(`/holdings`),
+  holdings:      (force = false) => req<HoldingsResp>(`/holdings${force ? "?force=1" : ""}`),
   holdingAdd:    (h: { symbol: string; kind: "stock"|"etf"|"crypto"|"mf"|"debt"; shares: number; cost_basis: number; currency?: string; note?: string; monthly_contribution?: number }) =>
     req(`/holdings`, { method: "POST", body: JSON.stringify(h) }),
   holdingDelete: (id: number) => req(`/holdings/${id}`, { method: "DELETE" }),
+  holdingPatch: (id: number, patch: { monthly_contribution?: number; shares?: number; cost_basis?: number; symbol?: string; kind?: string }) =>
+    req(`/holdings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   holdingsImport: (file: File, replace = true) => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("replace", replace ? "1" : "0");
-    return fetch(`${API}/holdings/import`, { method: "POST", body: fd })
+    return authFetch(`/holdings/import`, { method: "POST", body: fd })
       .then(async r => {
         const j = await r.json();
         if (!r.ok) throw new Error(j.error ?? r.statusText);
         return j as { source: string; imported: number; skipped: number; consolidated?: number };
       });
   },
+  holdingsSyncGmail: () => req<{ ok: boolean; imported: number; error?: string }>(`/holdings/sync-gmail`, { method: "POST" }),
   holdingsResolve: () => req<{ tried: number; resolved: number }>(`/holdings/resolve`, { method: "POST" }),
-  holdingsAdvice: (force = false) =>
-    req<{ advice?: string; error?: string; cached?: boolean }>(`/holdings/advice`, { method: "POST", body: JSON.stringify({ force }) }),
-  holdingsAdvisor: (messages: { role: "user" | "assistant"; content: string }[]) =>
-    req<{ answer?: string; error?: string }>(`/holdings/advisor`, { method: "POST", body: JSON.stringify({ messages }) }),
+  holdingsAdvice: (force = false, onChunk?: (t: string) => void) => {
+    if (!onChunk) return req<{ advice?: string; error?: string; cached?: boolean }>(`/holdings/advice`, { method: "POST", body: JSON.stringify({ force }) });
+    return authFetch(`/holdings/advice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force, stream: true }) })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text());
+        const contentType = r.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+           const j = await r.json();
+           if (j.advice) onChunk(j.advice);
+           return j as { advice?: string; error?: string; cached?: boolean };
+        }
+        const reader = r.body!.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          full += chunk;
+          onChunk(chunk);
+        }
+        return { advice: full } as { advice?: string; error?: string; cached?: boolean };
+      });
+  },
+  holdingsAdvisor: (messages: { role: "user" | "assistant"; content: string }[], onChunk?: (t: string) => void) => {
+    if (!onChunk) return req<{ answer?: string; error?: string }>(`/holdings/advisor`, { method: "POST", body: JSON.stringify({ messages }) });
+    return authFetch(`/holdings/advisor`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messages, stream: true }) })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text());
+        const reader = r.body!.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          full += chunk;
+          onChunk(chunk);
+        }
+        return { answer: full } as { answer?: string; error?: string };
+      });
+  },
   holdingsSearch: (q: string) =>
     req<Array<{ symbol: string; name: string; kind: "stock"|"etf"|"crypto"|"mf"|"debt"; currency: string; source: "preset"|"yahoo"|"amfi"; exchange?: string; nav?: number }>>(`/holdings/search?q=${encodeURIComponent(q)}`),
 
   financeImport: (csv: string) =>
-    fetch(`${API}/finance/import`, { method: "POST", headers: { "Content-Type": "text/csv" }, body: csv })
+    authFetch(`/finance/import`, { method: "POST", headers: { "Content-Type": "text/csv" }, body: csv })
       .then(r => r.json() as Promise<{ imported: number; failed: number }>),
 
-  devSeed: (days = 60) => fetch(`${API}/dev/seed?days=${days}`, { method: "POST" }).then(r => r.json()),
-  devWipe: () => fetch(`${API}/dev/wipe`, { method: "POST" }).then(r => r.json()),
+  devSeed: (days = 60) => authFetch(`/dev/seed?days=${days}`, { method: "POST" }).then(r => r.json()),
+  devWipe: () => authFetch(`/dev/wipe`, { method: "POST" }).then(r => r.json()),
+  devImport: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return authFetch(`/dev/import`, { method: "POST", body: fd }).then(r => r.json());
+  },
 };
 
 export type Stats = {
@@ -141,13 +266,19 @@ export type Stats = {
   weight?: (number | null)[];
   kcal?: number[];
   sleep?: (number | null)[];
+  water?: number[];
   categories: { labels: string[]; values: number[] };
 };
-export type Txn = { id: number; ts: string; amount: number; category: string; note: string | null; kind: "expense" | "income" };
+export type Txn = { id: number; ts: string; amount: number; category: string; note: string | null; kind: "expense" | "income" | "transfer"; account_id: number | null; to_account_id: number | null };
 export type Session = { id: number; label: string; category: string; started_at: string; ended_at: string | null };
+export type Account = {
+  id: number; name: string; type: "bank" | "cash" | "credit_card" | "receivable" | "payable"; currency: string;
+  initial_balance: number; balance: number; created_at: string;
+};
 export type Task = {
   id: number; title: string; notes: string | null;
-  priority: 1 | 2 | 3; due_date: string | null; done: 0 | 1;
+  priority: 1 | 2 | 3; due_date: string | null; due_time: string | null; done: 0 | 1;
+  is_important: 0 | 1; is_urgent: 0 | 1; duration_minutes: number;
   created_at: string; done_at: string | null;
 };
 
@@ -162,6 +293,7 @@ export type Summary = {
   positive: { wins: number; gratitude: number };
   weight?: { last: number | null; day: string | null; delta: number | null };
   calories?: { today: number; avg: number };
+  water?: { today: number };
 };
 export type SleepEntry = {
   day: string; bedtime: string | null; waketime: string | null;
@@ -184,6 +316,8 @@ export type LLMConfig = {
   has_key: boolean;
   model: string;
   base_url: string | null;
+  auth_type?: "api_key" | "oauth";
+  context_days?: number;
 };
 
 export type Profile = {
@@ -197,17 +331,25 @@ export type Profile = {
   goal?: string | null;
   vault_path?: string | null;
   journal_subdir?: string | null;
+  alias?: string | null;
+  google_client_id?: string | null;
+  google_client_secret?: string | null;
+  monthly_budget?: number | null;
+  fixed_categories?: string | null;
 };
 
-export type Meal = { id: number; ts: string; name: string; kcal: number; protein_g: number | null; carbs_g: number | null; fat_g: number | null; note: string | null };
+export type Meal = { id: number; ts: string; name: string; kcal: number; protein_g: number | null; carbs_g: number | null; fat_g: number | null; note: string | null; meal_type: "breakfast" | "lunch" | "dinner" | "snack" };
 export type Holding = {
   id: number; symbol: string; kind: "stock"|"etf"|"crypto"|"mf"|"debt";
   shares: number; cost_basis: number; currency: string;
   price: number; value: number; cost: number; gain: number; gain_pct: number;
+  daily_gain?: number; daily_gain_pct?: number;
   quote_currency: string;
+  monthly_contribution?: number;
 };
 export type HoldingsResp = {
   holdings: Holding[]; total: number; cost: number; gain: number;
-  grand?: { currency: string; value: number; cost: number; gain: number; pct: number } | null;
+  grand?: { currency: string; value: number; cost: number; gain: number; pct: number; daily_gain?: number } | null;
+  market_live?: { in: boolean; us: boolean };
   fx_ok?: boolean;
 };

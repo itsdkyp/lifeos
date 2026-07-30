@@ -2,18 +2,60 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { q, q1, run } from "./db.ts";
+import { q, q1, run, db } from "./db.ts";
 import { syncDay } from "./obsidian.ts";
 import { askLLM, callChat, getConfig, PROVIDERS, type Provider } from "./llm.ts";
 import { importBrokerFile, type NormHolding } from "./importers.ts";
 import {
   copilotStartDevice, copilotPollDevice, copilotGetAuth,
   anthropicStart, anthropicPoll, anthropicFinishManual,
-  getToken, clearToken,
+  googleGetAccessToken, googleExchangeCode, createGoogleTask, markGoogleTaskDone, updateGoogleTask,
+  saveToken, getToken, clearToken,
 } from "./oauth.ts";
 
 const app = new Hono();
-app.use("*", cors({ origin: "*" }));
+
+// CORS: only allow the local dev origin. Set LIFEOS_CORS_ORIGIN to override.
+const allowedOrigin = process.env.LIFEOS_CORS_ORIGIN ?? "http://localhost:3000";
+app.use("*", cors({ origin: (origin) => {
+  // Allow no-origin (curl/tools), the explicit allowed origin, or any 127.0.0.1:*/localhost:* dev port.
+  if (!origin) return origin;
+  if (origin === allowedOrigin) return origin;
+  if (/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin)) return origin;
+  return null;
+}}));
+
+// ── Bearer-token auth ──────────────────────────────────────────
+// Enabled when LIFEOS_TOKEN is set. Applied to every route EXCEPT /health.
+// Also accepts token via ?token=... query for cases like /dev/export downloads.
+const LIFEOS_TOKEN = process.env.LIFEOS_TOKEN;
+if (LIFEOS_TOKEN && LIFEOS_TOKEN.length < 16) {
+  console.error("❌ LIFEOS_TOKEN is too short (<16 chars). Refusing to start. Generate one with: openssl rand -hex 32");
+  process.exit(1);
+}
+app.use("*", async (c, next) => {
+  if (!LIFEOS_TOKEN) return next(); // auth disabled
+  if (c.req.path === "/health") return next(); // liveness probe stays open
+  if (c.req.method === "OPTIONS") return next(); // CORS preflight
+
+  const auth = c.req.header("Authorization") ?? "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  const qtoken = c.req.query("token") ?? null;
+  const provided = bearer ?? qtoken;
+
+  if (!provided || provided !== LIFEOS_TOKEN) {
+    return c.json({ error: "Unauthorized. Set Authorization: Bearer <token>." }, 401);
+  }
+  return next();
+});
+
+// Global error handler: sanitize responses so we don't leak upstream provider bodies verbatim.
+app.onError((err, c) => {
+  const msg = String(err?.message ?? err).slice(0, 300);
+  console.error(`[${c.req.method} ${c.req.path}]`, msg);
+  return c.json({ error: msg }, 500);
+});
+app.notFound((c) => c.json({ error: `Route not found: ${c.req.method} ${c.req.path}` }, 404));
 
 const today = () => {
   const d = new Date();
@@ -28,14 +70,26 @@ app.get("/health", (c) => c.json({ ok: true, ts: now() }));
 app.get("/profile", (c) => {
   const p = q1<any>("SELECT * FROM profile WHERE id=1");
   if (!p) return c.json(null);
-  const { values_json, ...rest } = p;
-  return c.json({ ...rest, values: values_json ?? null });
+  const { values_json, google_client_secret, ...rest } = p;
+  // Mask the OAuth client secret: expose only whether it's set and the last 4 chars.
+  const gcs_mask = google_client_secret ? `••••${String(google_client_secret).slice(-4)}` : null;
+  return c.json({
+    ...rest,
+    values: values_json ?? null,
+    google_client_secret: gcs_mask,
+    has_google_client_secret: !!google_client_secret,
+  });
 });
 
 app.put("/profile",
   zValidator("json", z.object({
     name: z.string().min(1),
-    dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional()
+      .refine(val => {
+        if (!val) return true;
+        const years = (Date.now() - new Date(val).getTime()) / (365.25 * 864e5);
+        return years >= 0 && years <= 120;
+      }, "DOB cannot be in the future and age cannot exceed 120"),
     pronouns: z.string().nullable().optional(),
     timezone: z.string().nullable().optional(),
     currency: z.string().max(6).nullable().optional(),
@@ -44,24 +98,42 @@ app.put("/profile",
     goal: z.string().nullable().optional(),
     vault_path: z.string().nullable().optional(),
     journal_subdir: z.string().nullable().optional(),
+    alias: z.string().nullable().optional(),
+    google_client_id: z.string().nullable().optional(),
+    google_client_secret: z.string().nullable().optional(),
+    monthly_budget: z.number().nonnegative().nullable().optional(),
+    fixed_categories: z.string().nullable().optional(),
   })),
   (c) => {
     const p = c.req.valid("json");
     const existing = q1<any>("SELECT * FROM profile WHERE id=1");
     const created = existing?.created_at ?? now();
-    run(`INSERT INTO profile(id,name,dob,pronouns,timezone,currency,sleep_target_hours,values_json,goal,vault_path,journal_subdir,created_at,updated_at)
-         VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
+    run(`INSERT INTO profile(id,name,dob,pronouns,timezone,currency,sleep_target_hours,values_json,goal,vault_path,journal_subdir,alias,google_client_id,google_client_secret,monthly_budget,fixed_categories,created_at,updated_at)
+         VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
            name=excluded.name, dob=excluded.dob, pronouns=excluded.pronouns,
            timezone=excluded.timezone, currency=excluded.currency,
            sleep_target_hours=excluded.sleep_target_hours,
            values_json=excluded.values_json, goal=excluded.goal,
            vault_path=excluded.vault_path, journal_subdir=excluded.journal_subdir,
+           alias=excluded.alias,
+           google_client_id=excluded.google_client_id,
+           google_client_secret=excluded.google_client_secret,
+           monthly_budget=excluded.monthly_budget,
+           fixed_categories=excluded.fixed_categories,
            updated_at=excluded.updated_at`,
       p.name, p.dob ?? null, p.pronouns ?? null, p.timezone ?? null,
       p.currency ?? "USD", p.sleep_target_hours ?? 8, p.values ?? null, p.goal ?? null,
       p.vault_path?.trim() || existing?.vault_path || null,
       p.journal_subdir?.trim() || existing?.journal_subdir || null,
+      p.alias ?? null,
+      p.google_client_id ?? existing?.google_client_id ?? null,
+      // Preserve the real secret if the frontend echoed back the masked value.
+      (p.google_client_secret && !p.google_client_secret.startsWith("••••"))
+        ? p.google_client_secret
+        : (existing?.google_client_secret ?? null),
+      p.monthly_budget ?? existing?.monthly_budget ?? null,
+      p.fixed_categories ?? existing?.fixed_categories ?? "[]",
       created, now());
     return c.json({ ok: true });
   });
@@ -101,12 +173,14 @@ app.post("/finance",
     amount: z.number().positive(),
     category: z.string().min(1),
     note: z.string().optional(),
-    kind: z.enum(["expense", "income"]).default("expense"),
+    kind: z.enum(["expense", "income", "transfer"]).default("expense"),
+    account_id: z.number().optional().nullable(),
+    to_account_id: z.number().optional().nullable(),
   })),
   async (c) => {
-    const { amount, category, note, kind } = c.req.valid("json");
-    run("INSERT INTO transactions(ts,amount,category,note,kind) VALUES(?,?,?,?,?)",
-        now(), amount, category, note ?? null, kind);
+    const { amount, category, note, kind, account_id, to_account_id } = c.req.valid("json");
+    run("INSERT INTO transactions(ts,amount,category,note,kind,account_id,to_account_id) VALUES(?,?,?,?,?,?,?)",
+        now(), amount, category, note ?? null, kind, account_id ?? null, to_account_id ?? null);
     await syncDay(today());
     return c.json({ ok: true });
   });
@@ -117,6 +191,73 @@ app.get("/finance", (c) => {
   return c.json(q("SELECT * FROM transactions WHERE ts>=? ORDER BY ts DESC", since));
 });
 
+app.get("/finance/budget", (c) => {
+  const p = q1<{ monthly_budget: number | null; fixed_categories: string | null }>("SELECT monthly_budget, fixed_categories FROM profile WHERE id=1");
+  const budget = p?.monthly_budget ?? null;
+  const fixedCatsRaw = p?.fixed_categories ? JSON.parse(p.fixed_categories) : [];
+  const fixedCats = Array.isArray(fixedCatsRaw) ? fixedCatsRaw.map(s => String(s).toLowerCase().trim()) : [];
+  
+  const nowStr = today();
+  const [y, m] = nowStr.split("-").map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const dayOfMonth = new Date().getDate();
+  const daysRemaining = daysInMonth - dayOfMonth;
+  
+  const startOfMonth = `${y}-${String(m).padStart(2, "0")}-01`;
+  
+  const txns = q<{ amount: number; category: string }>("SELECT amount, category FROM transactions WHERE kind='expense' AND date(ts, 'localtime')>=?", startOfMonth);
+  
+  let totalDiscretionary = 0;
+  let totalFixed = 0;
+  
+  for (const t of txns) {
+    if (fixedCats.includes(t.category.toLowerCase().trim())) {
+      totalFixed += t.amount;
+    } else {
+      totalDiscretionary += t.amount;
+    }
+  }
+  
+  let pacing = null;
+  if (budget != null) {
+    const remainingBudget = budget - totalDiscretionary;
+    const safeDaily = remainingBudget > 0 && daysRemaining > 0 ? remainingBudget / (daysRemaining + 1) : 0; // +1 to include today
+    const spentToday = q1<{ v: number }>(
+      "SELECT COALESCE(SUM(amount),0) v FROM transactions WHERE kind='expense' AND date(ts, 'localtime')=?", nowStr)!.v;
+    
+    // We want discretionary spent today. Re-querying to apply filter.
+    const todayTxns = q<{ amount: number; category: string }>("SELECT amount, category FROM transactions WHERE kind='expense' AND date(ts, 'localtime')=?", nowStr);
+    let discSpentToday = 0;
+    for (const t of todayTxns) {
+      if (!fixedCats.includes(t.category.toLowerCase().trim())) {
+        discSpentToday += t.amount;
+      }
+    }
+    
+    // If safeDaily is based on remaining budget BEFORE today's spend is subtracted:
+    // Wait, `totalDiscretionary` INCLUDES today's spend already because it queries `>= startOfMonth`.
+    // The "Rollover Method" psychology: safe to spend today = (Budget - Total Spent BEFORE Today) / days left including today.
+    const discSpentBeforeToday = totalDiscretionary - discSpentToday;
+    const remainingBeforeToday = budget - discSpentBeforeToday;
+    const safeDailyBeforeToday = remainingBeforeToday > 0 ? remainingBeforeToday / (daysRemaining + 1) : 0;
+    
+    // Now the balance for today specifically:
+    const safeToSpendToday = safeDailyBeforeToday - discSpentToday;
+
+    pacing = {
+      budget,
+      total_discretionary: totalDiscretionary,
+      total_fixed: totalFixed,
+      safe_daily_base: safeDailyBeforeToday,
+      safe_to_spend_today: safeToSpendToday,
+      days_in_month: daysInMonth,
+      days_remaining: daysRemaining,
+    };
+  }
+
+  return c.json(pacing);
+});
+
 app.delete("/finance/:id", async (c) => {
   const id = Number(c.req.param("id"));
   const row = q1<{ ts: string }>("SELECT ts FROM transactions WHERE id=?", id);
@@ -124,6 +265,118 @@ app.delete("/finance/:id", async (c) => {
   if (row) await syncDay(row.ts.slice(0, 10));
   return c.json({ ok: true });
 });
+
+// ── accounts ─────────────────────────────────────────────────────────────
+app.get("/accounts", async (c) => {
+  const accounts = q<any>("SELECT * FROM accounts ORDER BY name");
+  const txns = q<{ account_id: number | null; to_account_id: number | null; amount: number; kind: string }>(
+    "SELECT account_id, to_account_id, amount, kind FROM transactions WHERE account_id IS NOT NULL OR to_account_id IS NOT NULL"
+  );
+  
+  const balances: Record<number, number> = {};
+  for (const t of txns) {
+    if (t.kind === "transfer") {
+      if (t.account_id) {
+        if (!balances[t.account_id]) balances[t.account_id] = 0;
+        balances[t.account_id] -= t.amount;
+      }
+      if (t.to_account_id) {
+        if (!balances[t.to_account_id]) balances[t.to_account_id] = 0;
+        balances[t.to_account_id] += t.amount;
+      }
+    } else {
+      if (t.account_id) {
+        if (!balances[t.account_id]) balances[t.account_id] = 0;
+        balances[t.account_id] += t.kind === "income" ? t.amount : -t.amount;
+      }
+    }
+  }
+  
+  const enriched = accounts.map(a => {
+    // For liabilities, the user enters a positive initial balance (e.g. 500 owed).
+    // We treat this as a negative starting point.
+    const isLiability = a.type === "credit_card" || a.type === "payable";
+    const startBal = isLiability ? -a.initial_balance : a.initial_balance;
+    const currentBal = startBal + (balances[a.id] || 0);
+    return {
+      ...a,
+      balance: currentBal
+    };
+  });
+  
+  // Convert grand total to target currency
+  const profile = q1<{ currency: string | null }>("SELECT currency FROM profile WHERE id=1");
+  const targetCcy = profile?.currency || "USD";
+  const rates = await getFXRates();
+  
+  const grand = rates ? {
+    currency: targetCcy,
+    value: enriched.reduce((sum, a) => sum + convert(a.balance, a.currency, targetCcy, rates), 0)
+  } : null;
+
+  return c.json({ accounts: enriched, grand, fx_ok: !!rates });
+});
+
+app.post("/accounts",
+  zValidator("json", z.object({
+    name: z.string().min(1),
+    type: z.enum(["bank", "cash", "credit_card", "receivable", "payable"]).default("bank"),
+    currency: z.string().default("USD"),
+    initial_balance: z.number().default(0),
+    funding_account_id: z.number().optional().nullable(),
+  })),
+  (c) => {
+    const a = c.req.valid("json");
+    
+    // If a funding account is provided, the initial balance of the account itself is 0,
+    // and we create a transaction to represent the flow of money.
+    const actual_initial = a.funding_account_id ? 0 : a.initial_balance;
+    
+    const stmt = db.prepare("INSERT INTO accounts(name,type,currency,initial_balance,created_at) VALUES(?,?,?,?,?) RETURNING id");
+    const row = stmt.get(a.name, a.type, a.currency, actual_initial, now()) as { id: number };
+    
+    if (a.funding_account_id && a.initial_balance > 0) {
+      // If we are giving them money now (receivable): money flows FROM funding_account TO new_account
+      // If they are giving us money now (payable): money flows FROM new_account TO funding_account
+      const flowToBank = a.type === "payable";
+      run("INSERT INTO transactions(ts,amount,category,note,kind,account_id,to_account_id) VALUES(?,?,?,?,?,?,?)",
+        now(), a.initial_balance, "transfer", `Initial funding for ${a.name}`, "transfer",
+        flowToBank ? row.id : a.funding_account_id,
+        flowToBank ? a.funding_account_id : row.id
+      );
+    }
+    
+    return c.json({ ok: true, id: row.id });
+  });
+
+app.delete("/accounts/:id", (c) => {
+  const id = Number(c.req.param("id"));
+  run("DELETE FROM accounts WHERE id=?", id);
+  return c.json({ ok: true });
+});
+
+app.patch("/accounts/:id",
+  zValidator("json", z.object({
+    name: z.string().min(1).optional(),
+    type: z.enum(["bank", "cash", "credit_card", "receivable", "payable"]).optional(),
+    currency: z.string().optional(),
+    initial_balance: z.number().optional(),
+  })),
+  (c) => {
+    const id = Number(c.req.param("id"));
+    const patch = c.req.valid("json");
+    const sets: string[] = [], vals: any[] = [];
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) continue;
+      sets.push(`${k}=?`);
+      vals.push(v);
+    }
+    if (sets.length) {
+      vals.push(id);
+      run(`UPDATE accounts SET ${sets.join(",")} WHERE id=?`, ...vals);
+    }
+    return c.json({ ok: true });
+  });
 
 // ── time tracking ─────────────────────────────────────────────────────────
 app.get("/time/active", (c) =>
@@ -148,6 +401,21 @@ app.post("/time/stop", async (c) => {
   return c.json({ ok: true });
 });
 
+app.post("/time/log",
+  zValidator("json", z.object({ label: z.string().min(1), category: z.string().optional(), duration_seconds: z.number().positive() })),
+  async (c) => {
+    let { label, category, duration_seconds } = c.req.valid("json");
+    label = label.trim().toLowerCase();
+    const cat = category ?? inferCategory(label);
+    const end = new Date();
+    const start = new Date(end.getTime() - duration_seconds * 1000);
+    run("UPDATE time_sessions SET ended_at=? WHERE ended_at IS NULL", now());
+    run("INSERT INTO time_sessions(label,category,started_at,ended_at) VALUES(?,?,?,?)",
+        label, cat, start.toISOString(), end.toISOString());
+    await syncDay(today());
+    return c.json({ ok: true });
+  });
+
 app.get("/time", (c) => {
   const days = Number(c.req.query("days") ?? 30);
   const since = new Date(Date.now() - days * 864e5).toISOString();
@@ -163,17 +431,74 @@ app.get("/tasks", (c) => {
      ORDER BY done, (due_date IS NULL), due_date, priority DESC, id DESC`));
 });
 
+app.post("/tasks/sync", async (c) => {
+  try {
+    const token = await googleGetAccessToken();
+    // Fetch all Google Tasks (including completed ones, hidden ones)
+    const r = await fetch("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showHidden=true", {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!r.ok) throw new Error(`Google Tasks fetch failed: ${r.status}`);
+    const j = await r.json() as any;
+    const items = j.items || [];
+    
+    let updated = 0;
+    let imported = 0;
+
+    // 1. Sync completions back to LifeOS
+    const openTasks = q<{ id: number; google_event_id: string }>("SELECT id, google_event_id FROM tasks WHERE done=0 AND google_event_id IS NOT NULL");
+    for (const t of openTasks) {
+      const gTask = items.find((x: any) => x.id === t.google_event_id);
+      if (gTask && gTask.status === "completed") {
+        run("UPDATE tasks SET done=1, done_at=? WHERE id=?", now(), t.id);
+        updated++;
+      }
+    }
+
+    // 2. Import existing Google Tasks into LifeOS that we don't have yet
+    const existingGoogleIds = new Set(q<{ google_event_id: string }>("SELECT google_event_id FROM tasks WHERE google_event_id IS NOT NULL").map(x => x.google_event_id));
+    for (const gTask of items) {
+      if (!existingGoogleIds.has(gTask.id) && gTask.status !== "completed") {
+        // It's an open task in Google that LifeOS doesn't know about. Import it!
+        const dueStr = gTask.due ? gTask.due.slice(0, 10) : null;
+        run("INSERT INTO tasks(title,notes,priority,due_date,is_important,is_urgent,duration_minutes,google_event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            gTask.title || "Untitled Task", gTask.notes || null, 2, dueStr, 0, 0, 15, gTask.id, now());
+        imported++;
+      }
+    }
+
+    return c.json({ ok: true, updated, imported });
+  } catch (e: any) {
+    return c.json({ error: String(e?.message ?? e) }, 500);
+  }
+});
+
 app.post("/tasks",
   zValidator("json", z.object({
     title: z.string().min(1),
     notes: z.string().optional(),
     priority: z.number().int().min(1).max(3).default(2),
     due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    due_time: z.string().regex(/^\d{2}:\d{2}$/).optional().nullable(),
+    is_important: z.boolean().default(false),
+    is_urgent: z.boolean().default(false),
+    duration_minutes: z.number().min(1).max(1440).default(15),
   })),
   async (c) => {
     const t = c.req.valid("json");
-    run("INSERT INTO tasks(title,notes,priority,due_date,created_at) VALUES(?,?,?,?,?)",
-        t.title, t.notes ?? null, t.priority, t.due_date ?? null, now());
+    let eventId: string | null = null;
+    
+    // Create Google Task if we have a due date and Google is connected
+    if (t.due_date && getToken("google")?.access_token) {
+      try {
+        eventId = await createGoogleTask(t.title, t.due_date, t.notes);
+      } catch (e) {
+        console.error("Failed to sync task to Google Tasks:", e);
+      }
+    }
+
+    run("INSERT INTO tasks(title,notes,priority,due_date,due_time,is_important,is_urgent,duration_minutes,google_event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        t.title, t.notes ?? null, t.priority, t.due_date ?? null, t.due_time ?? null, t.is_important ? 1 : 0, t.is_urgent ? 1 : 0, t.duration_minutes, eventId, now());
     if (t.due_date) await syncDay(t.due_date);
     return c.json({ ok: true });
   });
@@ -184,12 +509,15 @@ app.patch("/tasks/:id",
     notes: z.string().optional(),
     priority: z.number().int().min(1).max(3).optional(),
     due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    due_time: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
     done: z.boolean().optional(),
+    is_important: z.boolean().optional(),
+    is_urgent: z.boolean().optional(),
   })),
   async (c) => {
     const id = Number(c.req.param("id"));
     const patch = c.req.valid("json");
-    const existing = q1<{ due_date: string | null; done: number }>("SELECT due_date, done FROM tasks WHERE id=?", id);
+    const existing = q1<{ title: string; notes: string | null; due_date: string | null; done: number; google_event_id: string | null }>("SELECT title, notes, due_date, done, google_event_id FROM tasks WHERE id=?", id);
     if (!existing) return c.json({ error: "not found" }, 404);
     const sets: string[] = [], vals: any[] = [];
     for (const [k, v] of Object.entries(patch)) {
@@ -197,9 +525,42 @@ app.patch("/tasks/:id",
       sets.push(`${k}=?`);
       vals.push(k === "done" ? (v ? 1 : 0) : v);
     }
-    if (patch.done === true && !existing.done)  { sets.push("done_at=?"); vals.push(now()); }
+    
+    // Sync completion
+    if (patch.done === true && !existing.done)  { 
+      sets.push("done_at=?"); vals.push(now()); 
+      if (existing.google_event_id) {
+        try { await markGoogleTaskDone(existing.google_event_id); } catch (e) { console.error("Failed to mark Google task done:", e); }
+      }
+    }
     if (patch.done === false && existing.done)  { sets.push("done_at=?"); vals.push(null); }
+    
+    // Sync due_date / title / notes to Google
+    let newGoogleId = existing.google_event_id;
+    if (getToken("google")?.access_token) {
+      if (!existing.google_event_id && patch.due_date) {
+        // Did not have Google task, but now has a due date. Let's create it.
+        try {
+          const title = patch.title || existing.title;
+          const notes = patch.notes || existing.notes || undefined;
+          newGoogleId = await createGoogleTask(title, patch.due_date, notes);
+          sets.push(`google_event_id=?`);
+          vals.push(newGoogleId);
+        } catch (e) { console.error("Failed to sync new task to Google Tasks:", e); }
+      } else if (existing.google_event_id && (patch.due_date !== undefined || patch.title !== undefined || patch.notes !== undefined)) {
+        // Has Google task, update its metadata
+        try {
+          await updateGoogleTask(existing.google_event_id, {
+            title: patch.title,
+            notes: patch.notes,
+            due: patch.due_date
+          });
+        } catch (e) { console.error("Failed to update Google task:", e); }
+      }
+    }
+
     if (sets.length) { vals.push(id); run(`UPDATE tasks SET ${sets.join(",")} WHERE id=?`, ...vals); }
+    
     // resync affected days
     const daysToSync = new Set<string>();
     if (existing.due_date) daysToSync.add(existing.due_date);
@@ -233,14 +594,14 @@ app.post("/sleep/:day",
   async (c) => {
     const day = c.req.param("day");
     const b = c.req.valid("json");
-    // Compute hours from bed/wake if not supplied
+    // Compute hours from bed/wake if not supplied.
+    // Convention: bedtime is the previous evening, waketime is the following morning,
+    // so we always compute forward-in-time modulo 24h.
     let hours = b.hours ?? null;
     if (hours == null && b.bedtime && b.waketime) {
       const toMin = (t: string) => { const [h, m] = t.split(":").map(Number); return h! * 60 + m!; };
-      let d = toMin(b.waketime) - toMin(b.bedtime);
-      if (d < 0) d += 24 * 60;                  // bedtime after midnight
-      if (b.bedtime > b.waketime && d > 12*60) d = 24*60 - d;
-      hours = Math.round((d / 60) * 10) / 10;
+      const forward = (toMin(b.waketime) - toMin(b.bedtime) + 24 * 60) % (24 * 60);
+      hours = Math.round((forward / 60) * 10) / 10;
     }
     run(`INSERT INTO sleep(day,bedtime,waketime,hours,quality,note,updated_at)
          VALUES(?,?,?,?,?,?,?)
@@ -289,17 +650,20 @@ app.delete("/gratitudes/:id", async (c) => { const r = q1<{ day: string }>("SELE
 // ── habits ───────────────────────────────────────────────────────────────────────────────────────
 app.get("/habits", (c) => c.json(q("SELECT * FROM habits WHERE archived=0 ORDER BY id")));
 
+const HABIT_COLORS = ["#f87171", "#fb923c", "#fbbf24", "#34d399", "#2dd4bf", "#22d3ee", "#60a5fa", "#818cf8", "#a78bfa", "#f472b6", "#fb7185"];
+const randColor = () => HABIT_COLORS[Math.floor(Math.random() * HABIT_COLORS.length)];
+
 app.post("/habits",
   zValidator("json", z.object({
     name: z.string().min(1),
     cadence: z.enum(["daily", "weekly"]).default("daily"),
     target_per_week: z.number().int().min(1).max(7).default(7),
-    color: z.string().default("#60a5fa"),
+    color: z.string().optional(),
   })),
   (c) => {
     const h = c.req.valid("json");
     run("INSERT INTO habits(name,cadence,target_per_week,color,created_at) VALUES(?,?,?,?,?)",
-        h.name, h.cadence, h.target_per_week, h.color, now());
+        h.name, h.cadence, h.target_per_week, h.color || randColor(), now());
     return c.json({ ok: true });
   });
 
@@ -329,7 +693,10 @@ app.delete("/habits/:id/log/:day", async (c) => {
 app.get("/habits/grid", (c) => {
   const days = Number(c.req.query("days") ?? 30);
   const labels: string[] = [];
-  for (let i = days - 1; i >= 0; i--) labels.push(new Date(Date.now() - i * 864e5).toISOString().slice(0, 10));
+  for (let i = days - 1; i >= 0; i--) {
+    const dObj = new Date(Date.now() - i * 864e5);
+    labels.push(`${dObj.getFullYear()}-${String(dObj.getMonth()+1).padStart(2,"0")}-${String(dObj.getDate()).padStart(2,"0")}`);
+  }
   const habits = q<{ id: number; name: string; color: string; target_per_week: number }>(
     "SELECT id,name,color,target_per_week FROM habits WHERE archived=0 ORDER BY id");
   const logs = q<{ habit_id: number; day: string }>(
@@ -404,6 +771,8 @@ app.get("/summary", (c) => {
   const kcalToday = q1<{ v: number }>("SELECT COALESCE(SUM(kcal),0) v FROM meals WHERE date(ts, 'localtime')=?", d)!.v;
   const kcal7avg  = q1<{ v: number }>("SELECT COALESCE(AVG(daily),0) v FROM (SELECT SUM(kcal) daily FROM meals WHERE date(ts, 'localtime')>=? GROUP BY date(ts, 'localtime'))", windowStart)!.v;
 
+  const waterToday = q1<{ ml: number }>("SELECT ml FROM water WHERE day=?", d)?.ml ?? 0;
+
   return c.json({
     day: d,
     range_days: days,
@@ -416,6 +785,7 @@ app.get("/summary", (c) => {
     weight: { last: weightLast?.kg ?? null, day: weightLast?.day ?? null,
               delta: weightLast && weightWeekAgo ? Math.round((weightLast.kg - weightWeekAgo.kg)*10)/10 : null },
     calories: { today: kcalToday, avg: Math.round(kcal7avg) },
+    water: { today: waterToday },
   });
 });
 
@@ -499,6 +869,8 @@ app.get("/stats", (c) => {
     "SELECT date(ts, 'localtime') d, SUM(kcal) total FROM meals WHERE date(ts, 'localtime')>=? GROUP BY d", since).map(r => [r.d, r.total]));
   const sleepH = new Map(q<{ day: string; hours: number | null }>(
     "SELECT day, hours FROM sleep WHERE day>=?", since).map(r => [r.day, r.hours]));
+  const waterVol = new Map(q<{ day: string; ml: number }>(
+    "SELECT day, ml FROM water WHERE day>=?", since).map(r => [r.day, r.ml]));
 
   const cats = q<{ category: string; total: number }>(
     "SELECT category, SUM(amount) total FROM transactions WHERE kind='expense' AND date(ts, 'localtime')>=? GROUP BY category ORDER BY total DESC", since);
@@ -511,25 +883,232 @@ app.get("/stats", (c) => {
     weight: labels.map(d => weight.get(d) ?? null),
     kcal:   labels.map(d => kcal.get(d) ?? 0),
     sleep:  labels.map(d => sleepH.get(d) ?? null),
+    water:  labels.map(d => waterVol.get(d) ?? 0),
     categories: { labels: cats.map(x => x.category), values: cats.map(x => Math.round(x.total * 100) / 100) },
   });
 });
 
 // ── chat ──────────────────────────────────────────────────────────────────
 app.post("/chat",
-  zValidator("json", z.object({ q: z.string().min(1) })),
+  zValidator("json", z.object({ q: z.string().min(1), stream: z.boolean().optional() })),
   async (c) => {
-    const { q } = c.req.valid("json");
+    const { q: question, stream: isStream } = c.req.valid("json");
     // Try to execute a log intent before falling through to the LLM.
     try {
-      const acted = await tryLogIntent(q);
+      // First try the fast local Regex intent parser
+      const acted = await tryLogIntent(question);
       if (acted) return c.json({ answer: acted });
-      return c.json({ answer: await askLLM(q) });
+      
+      // If regex failed, let the LLM parse it to see if it's a complex natural language action
+      const llmActed = await tryLLMIntent(question);
+      if (llmActed) return c.json({ answer: llmActed });
+
+      // If no action was taken, assume it's a general question and answer it via the LLM context
+      if (isStream) {
+        const { streamText } = await import("hono/streaming");
+        return streamText(c, async (stream) => {
+          try { await askLLM(question, (text) => stream.write(text)); }
+          catch (e: any) { stream.write("\n\n[Error: " + String(e?.message ?? e) + "]"); }
+        });
+      }
+      return c.json({ answer: await askLLM(question) });
     } catch (e: any) { return c.json({ error: String(e?.message ?? e) }, 500); }
   });
 
 // Lightweight intent parser: if the user says "log/set/update mood 3", execute
 // and short-circuit. Mirrors the ⌘K palette but on the server.
+async function tryLLMIntent(raw: string): Promise<string | null> {
+  const cfg = getConfig();
+  if (!cfg) return null;
+  
+  const accounts = q<{id: number, name: string, type: string}>("SELECT id, name, type FROM accounts");
+  const accountsList = accounts.map(a => `ID ${a.id}: ${a.name} (${a.type})`).join("\n");
+
+  const habits = q<{name: string}>("SELECT name FROM habits WHERE archived=0");
+  const habitsList = habits.map(h => h.name).join(", ");
+  
+  const openTasks = q<{title: string}>("SELECT title FROM tasks WHERE done=0 LIMIT 30");
+  const tasksList = openTasks.map(t => t.title).join(", ");
+  
+  const prompt = `You are the intent parser for LifeOS. The user sent a message: "${raw}"
+If the user wants to log, add, or update their data, return ONLY a JSON array of actions. If they are just asking a question (e.g. "what did I spend?", "how is my mood?"), return an empty array [].
+
+Available context to match against:
+- Accounts: ${accountsList || "(no accounts created yet)"}
+- Habits: ${habitsList || "(no habits)"}
+- Open Tasks: ${tasksList || "(no open tasks)"}
+
+Available actions:
+- {"action": "log_water", "ml": number}
+- {"action": "log_weight", "kg": number}
+- {"action": "log_sleep", "hours": number, "quality": number (1-10, optional)}
+- {"action": "log_mood", "energy": number (1-10), "valence": number (1-10), "tag": string}
+- {"action": "log_expense", "amount": number, "category": string, "note": string, "account_id": number (optional)}
+- {"action": "log_income", "amount": number, "category": string, "note": string, "to_account_id": number (optional)}
+- {"action": "log_transfer", "amount": number, "account_id": number (from), "to_account_id": number (to), "note": string}
+- {"action": "log_iou", "person": string, "amount": number, "type": "lent" | "borrowed", "funding_account_id": number (optional, the bank account used)}
+- {"action": "add_task", "title": string, "due_date": "YYYY-MM-DD" (use today: ${today()})}
+- {"action": "mark_task_done", "match_text": string}
+- {"action": "log_habit", "name": string}
+- {"action": "log_win", "text": string}
+- {"action": "log_gratitude", "text": string}
+- {"action": "start_timer", "label": string, "category": string}
+- {"action": "stop_timer"}
+- {"action": "log_meal", "name": string, "kcal": number}
+
+Example 1 (User: "I drank 1L of water"):
+[{"action": "log_water", "ml": 1000}]
+
+Example 2 (User: "How much water did I drink today?"):
+[]
+
+Example 3 (User: "I spent $50 on food and 20 on coffee"):
+[{"action": "log_expense", "amount": 50, "category": "food", "note": ""}, {"action": "log_expense", "amount": 20, "category": "coffee", "note": ""}]
+
+Output ONLY the raw JSON array. Do not wrap it in backticks or markdown.`;
+
+  // Each action is validated with a Zod schema before touching the DB.
+  // Whitelisted schemas = no arbitrary SQL exposure via prompt injection.
+  const ActionSchema = z.discriminatedUnion("action", [
+    z.object({ action: z.literal("log_water"), ml: z.number().int().min(0).max(10000) }),
+    z.object({ action: z.literal("log_weight"), kg: z.number().positive().max(500) }),
+    z.object({ action: z.literal("log_sleep"), hours: z.number().positive().max(24), quality: z.number().int().min(1).max(10).optional() }),
+    z.object({ action: z.literal("log_mood"), energy: z.number().int().min(1).max(10), valence: z.number().int().min(1).max(10), tag: z.string().max(50).optional() }),
+    z.object({ action: z.literal("log_expense"), amount: z.number().nonnegative().max(1e9), category: z.string().min(1).max(80), note: z.string().max(500).optional(), account_id: z.number().int().positive().optional() }),
+    z.object({ action: z.literal("log_income"), amount: z.number().nonnegative().max(1e9), category: z.string().min(1).max(80), note: z.string().max(500).optional(), to_account_id: z.number().int().positive().optional() }),
+    z.object({ action: z.literal("log_transfer"), amount: z.number().nonnegative().max(1e9), account_id: z.number().int().positive().optional().nullable(), to_account_id: z.number().int().positive().optional().nullable(), note: z.string().max(500).optional() }),
+    z.object({ action: z.literal("log_iou"), person: z.string().min(1).max(80), amount: z.number().nonnegative().max(1e9), type: z.enum(["lent", "borrowed"]), funding_account_id: z.number().int().positive().optional().nullable() }),
+    z.object({ action: z.literal("add_task"), title: z.string().min(1).max(300), due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable() }),
+    z.object({ action: z.literal("mark_task_done"), match_text: z.string().min(1).max(200) }),
+    z.object({ action: z.literal("log_habit"), name: z.string().min(1).max(80) }),
+    z.object({ action: z.literal("log_win"), text: z.string().min(1).max(500) }),
+    z.object({ action: z.literal("log_gratitude"), text: z.string().min(1).max(500) }),
+    z.object({ action: z.literal("start_timer"), label: z.string().min(1).max(200), category: z.string().max(50).optional() }),
+    z.object({ action: z.literal("stop_timer") }),
+    z.object({ action: z.literal("log_meal"), name: z.string().min(1).max(200), kcal: z.number().int().nonnegative().max(20000) }),
+  ]);
+
+  let actions: any[];
+  try {
+    const reply = await callChat(cfg, [{ role: "system", content: "You are a JSON-only bot. Output only valid JSON." }, { role: "user", content: prompt }]);
+    const jsonStr = reply.replace(/```json/g, "").replace(/```/g, "").trim();
+    const parsed = JSON.parse(jsonStr);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    actions = parsed;
+  } catch {
+    return null; // LLM didn't return JSON — fall through to Q&A
+  }
+
+  const successes: string[] = [];
+  const failures: string[] = [];
+
+  for (const raw_action of actions) {
+    // Per-action try/catch: one failure never blocks the rest, and every failure is
+    // reported back to the user instead of silently swallowed.
+    try {
+      const parseResult = ActionSchema.safeParse(raw_action);
+      if (!parseResult.success) {
+        failures.push(`Rejected malformed action: ${JSON.stringify(raw_action).slice(0, 100)}`);
+        continue;
+      }
+      const a = parseResult.data;
+
+      if (a.action === "log_water") {
+        run("INSERT INTO water(day,ml,updated_at) VALUES(?,?,?) ON CONFLICT(day) DO UPDATE SET ml=MAX(0, water.ml + ?), updated_at=?", today(), a.ml, now(), a.ml, now());
+        await syncDay(today());
+        successes.push(`Logged ${a.ml}ml of water.`);
+      } else if (a.action === "log_weight") {
+        run("INSERT INTO weight(day,kg,updated_at) VALUES(?,?,?) ON CONFLICT(day) DO UPDATE SET kg=?, updated_at=?", today(), a.kg, now(), a.kg, now());
+        await syncDay(today());
+        successes.push(`Logged weight ${a.kg}kg.`);
+      } else if (a.action === "log_sleep") {
+        run("INSERT INTO sleep(day,hours,quality,updated_at) VALUES(?,?,?,?) ON CONFLICT(day) DO UPDATE SET hours=?, quality=COALESCE(?, sleep.quality), updated_at=?", today(), a.hours, a.quality ?? null, now(), a.hours, a.quality ?? null, now());
+        await syncDay(today());
+        successes.push(`Logged sleep ${a.hours}h${a.quality ? ` (quality ${a.quality})` : ''}.`);
+      } else if (a.action === "log_mood") {
+        run("INSERT INTO mood2d(ts,energy,valence,tag) VALUES(?,?,?,?)", now(), a.energy, a.valence, a.tag ?? null);
+        await syncDay(today());
+        successes.push(`Logged mood (Energy: ${a.energy}, Valence: ${a.valence}).`);
+      } else if (a.action === "log_expense") {
+        run("INSERT INTO transactions(ts,amount,category,note,kind,account_id) VALUES(?,?,?,?,?,?)", now(), a.amount, a.category, a.note ?? null, "expense", a.account_id ?? null);
+        await syncDay(today());
+        successes.push(`Logged expense ${a.amount} on ${a.category}.`);
+      } else if (a.action === "log_income") {
+        run("INSERT INTO transactions(ts,amount,category,note,kind,to_account_id) VALUES(?,?,?,?,?,?)", now(), a.amount, a.category, a.note ?? null, "income", a.to_account_id ?? null);
+        await syncDay(today());
+        successes.push(`Logged income ${a.amount} from ${a.category}.`);
+      } else if (a.action === "log_transfer") {
+        run("INSERT INTO transactions(ts,amount,category,note,kind,account_id,to_account_id) VALUES(?,?,?,?,?,?,?)", now(), a.amount, "transfer", a.note ?? null, "transfer", a.account_id ?? null, a.to_account_id ?? null);
+        await syncDay(today());
+        successes.push(`Logged transfer of ${a.amount}.`);
+      } else if (a.action === "log_iou") {
+        const personLower = a.person.toLowerCase();
+        let acc = q1<{id: number, type: string}>("SELECT id, type FROM accounts WHERE LOWER(name)=?", personLower);
+        const expectedType = a.type === "lent" ? "receivable" : "payable";
+        if (!acc) {
+          const profile = q1<{ currency: string | null }>("SELECT currency FROM profile WHERE id=1");
+          const ccy = profile?.currency || "USD";
+          const stmt = db.prepare("INSERT INTO accounts(name,type,currency,initial_balance,created_at) VALUES(?,?,?,?,?) RETURNING id");
+          const row = stmt.get(a.person, expectedType, ccy, 0, now()) as { id: number };
+          acc = { id: row.id, type: expectedType };
+        }
+        const flowToBank = a.type === "borrowed";
+        const from_id = flowToBank ? acc.id : (a.funding_account_id ?? null);
+        const to_id = flowToBank ? (a.funding_account_id ?? null) : acc.id;
+        run("INSERT INTO transactions(ts,amount,category,note,kind,account_id,to_account_id) VALUES(?,?,?,?,?,?,?)", now(), a.amount, "transfer", `IOU: ${a.type} ${a.amount}`, "transfer", from_id, to_id);
+        await syncDay(today());
+        successes.push(`Logged ${a.type} ${a.amount} with ${a.person}.`);
+      } else if (a.action === "add_task") {
+        run("INSERT INTO tasks(title,priority,due_date,created_at) VALUES(?,?,?,?)", a.title, 2, a.due_date ?? null, now());
+        if (a.due_date) await syncDay(a.due_date);
+        successes.push(`Added task: ${a.title}`);
+      } else if (a.action === "mark_task_done") {
+        const r = await tryTaskCompletion("done " + a.match_text);
+        if (r) successes.push(r);
+        else failures.push(`No task matched: ${a.match_text}`);
+      } else if (a.action === "log_habit") {
+        const h = q1<{id: number, name: string}>("SELECT id, name FROM habits WHERE LOWER(name) LIKE ? AND archived=0", `%${a.name.toLowerCase()}%`);
+        if (h) {
+          run("INSERT OR IGNORE INTO habit_logs(habit_id,day) VALUES(?,?)", h.id, today());
+          await syncDay(today());
+          successes.push(`Logged habit: ${h.name}`);
+        } else {
+          failures.push(`Habit not found: ${a.name}`);
+        }
+      } else if (a.action === "log_win") {
+        run("INSERT INTO wins(day,ts,text) VALUES(?,?,?)", today(), now(), a.text);
+        await syncDay(today());
+        successes.push(`Win logged ✨`);
+      } else if (a.action === "log_gratitude") {
+        run("INSERT INTO gratitudes(day,ts,text) VALUES(?,?,?)", today(), now(), a.text);
+        await syncDay(today());
+        successes.push(`Gratitude logged 🙏`);
+      } else if (a.action === "log_meal") {
+        run("INSERT INTO meals(ts,name,kcal,meal_type) VALUES(?,?,?,?)", now(), a.name, a.kcal, "snack");
+        await syncDay(today());
+        successes.push(`Logged meal: ${a.name} (${a.kcal} kcal).`);
+      } else if (a.action === "start_timer") {
+        run("UPDATE time_sessions SET ended_at=? WHERE ended_at IS NULL", now());
+        run("INSERT INTO time_sessions(label,category,started_at) VALUES(?,?,?)", a.label, a.category || "work", now());
+        successes.push(`Started timer for ${a.label}.`);
+      } else if (a.action === "stop_timer") {
+        run("UPDATE time_sessions SET ended_at=? WHERE ended_at IS NULL", now());
+        await syncDay(today());
+        successes.push(`Stopped active timer.`);
+      }
+    } catch (e: any) {
+      const label = raw_action?.action ?? "unknown";
+      failures.push(`Action "${label}" failed: ${String(e?.message ?? e).slice(0, 150)}`);
+    }
+  }
+
+  if (successes.length === 0 && failures.length === 0) return null;
+  const parts: string[] = [];
+  if (successes.length) parts.push(successes.join("\n"));
+  if (failures.length)  parts.push(`⚠️ ${failures.length} issue${failures.length > 1 ? "s" : ""}:\n` + failures.join("\n"));
+  return parts.join("\n\n");
+}
+
 async function tryLogIntent(raw: string): Promise<string | null> {
   // Multi-clause split — process each independent clause so "walked 15 min AND coffee ₹20" logs both.
   const clauses = raw.split(/\s+and\s+|\s*[;]\s*/i).map(c => c.trim()).filter(Boolean);
@@ -554,7 +1133,7 @@ async function tryOneClause(raw: string): Promise<string | null> {
       const existing = q1<{ id: number }>("SELECT id FROM habits WHERE LOWER(name)=? AND archived=0", name);
       if (existing) return `Habit "${name}" already exists.`;
       run("INSERT INTO habits(name,cadence,target_per_week,color,created_at) VALUES(?,?,?,?,?)",
-          name, "daily", 7, "#60a5fa", now());
+          name, "daily", 7, randColor(), now());
       return `Habit added · ${name}. Check it off daily at /habits or say "habit ${name.split(" ")[0]}".`;
     }
   }
@@ -673,6 +1252,17 @@ async function tryOneClause(raw: string): Promise<string | null> {
     return `Logged ${mm[1]} · ${mm[2]} kcal.`;
   }
 
+  // sleep [hours] [quality]
+  mm = s.match(/\bsleep\s+(\d+(?:\.\d+)?)(?:\s+(\d{1,2}))?$/i);
+  if (mm) {
+    const day = today();
+    const hours = parseFloat(mm[1]!);
+    const quality = mm[2] ? parseInt(mm[2]!, 10) : null;
+    run(`INSERT INTO sleep(day,hours,quality,updated_at) VALUES(?,?,?,?) ON CONFLICT(day) DO UPDATE SET hours=excluded.hours,quality=COALESCE(excluded.quality,sleep.quality),updated_at=excluded.updated_at`, day, hours, quality, now());
+    await syncDay(day);
+    return `Logged sleep ${hours}h${quality ? ` · quality ${quality}/10` : ""}.`;
+  }
+
   // sleep HH:MM HH:MM [quality]
   mm = s.match(/\bsleep\s+(\d{1,2}:\d{2})\s+(\d{1,2}:\d{2})(?:\s+(\d{1,2}))?/i);
   if (mm) {
@@ -704,10 +1294,14 @@ async function tryOneClause(raw: string): Promise<string | null> {
   }
 
   // start / stop time session
-  mm = s.match(/\b(?:start|started|starting|begin|began)\s+(.+)/i);
+  // Guard: skip if the text looks like a question (contains ?, or starts with what/how/why/where/when/who/is/are/do/does/did/can/could/should/would/will).
+  const looksLikeQuestion = /\?$/.test(s.trim()) || /^\s*(?:what|how|why|where|when|who|is|are|do|does|did|can|could|should|would|will)\b/i.test(s);
+
+  // start <label>: must be at the START of the phrase, not embedded in a question like "how do I start budgeting?"
+  mm = looksLikeQuestion ? null : s.match(/^\s*(?:let'?s\s+|please\s+|hey,?\s+)?(?:start|starting|begin|began)\s+(.+)/i);
   if (mm) {
-    const label = mm[1]!.replace(/\.$/, "").trim().toLowerCase();
-    if (label) {
+    const label = mm[1]!.replace(/[.!?]+$/, "").trim().toLowerCase();
+    if (label && label.length >= 2) {
       const active = q1<{ label: string; started_at: string }>(
         "SELECT label, started_at FROM time_sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1");
       if (active && active.label.toLowerCase() === label) {
@@ -721,7 +1315,8 @@ async function tryOneClause(raw: string): Promise<string | null> {
         : `Timer started · ${label}`;
     }
   }
-  if (/\b(?:stop|stopped|done|finished|ended)\b/i.test(s)) {
+  // stop/done timer: also skip if it looks like a question ("what did I get done today?")
+  if (!looksLikeQuestion && /^\s*(?:stop|stopped|done|finished|ended)\b/i.test(s.trim())) {
     const active = q1<{ id: number; label: string }>("SELECT id, label FROM time_sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1");
     if (active) {
       run("UPDATE time_sessions SET ended_at=? WHERE ended_at IS NULL", now());
@@ -839,6 +1434,54 @@ async function logExpense(category: string, amount: number): Promise<string> {
   return `Logged expense ${amount} on ${category}.`;
 }
 
+app.get("/calendar/google", async (c) => {
+  try {
+    const token = await googleGetAccessToken();
+    const d = new Date();
+    const timeMin = new Date(d.getFullYear(), d.getMonth() - 1, 1).toISOString();
+    const timeMax = new Date(d.getFullYear(), d.getMonth() + 2, 0).toISOString();
+    
+    // Fetch Calendar Events
+    const rEvents = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    
+    // Fetch Tasks
+    const rTasks = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showHidden=true&dueMin=${encodeURIComponent(timeMin)}&dueMax=${encodeURIComponent(timeMax)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    let items: any[] = [];
+    
+    if (rEvents.ok) {
+      const j = await rEvents.json() as any;
+      const evs = (j.items || []).map((e: any) => ({
+        id: e.id,
+        title: e.summary,
+        date: (e.start?.date || e.start?.dateTime)?.slice(0, 10),
+        type: "event"
+      })).filter((e: any) => !!e.date);
+      items = items.concat(evs);
+    }
+    
+    if (rTasks.ok) {
+      const j = await rTasks.json() as any;
+      const tsks = (j.items || []).map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        date: t.due?.slice(0, 10), // Google Tasks API returns 'due' as RFC 3339 timestamp
+        type: "task",
+        done: t.status === "completed"
+      })).filter((t: any) => !!t.date);
+      items = items.concat(tsks);
+    }
+
+    return c.json(items);
+  } catch (e: any) {
+    return c.json({ error: String(e?.message ?? e) }, 500);
+  }
+});
+
 // ── calendar (month overview) ─────────────────────────────────────────────
 app.get("/calendar/:month", (c) => {
   const m = c.req.param("month"); // YYYY-MM
@@ -849,6 +1492,23 @@ app.get("/calendar/:month", (c) => {
     "SELECT day, substr(content,1,120) AS preview FROM journals WHERE day>=? AND day<? ORDER BY day",
     first, next));
 });
+
+// ── water ─────────────────────────────────────────────────────────────────────────────────────────
+app.post("/water",
+  zValidator("json", z.object({
+    day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    ml: z.number().int().min(-5000).max(5000), // allow small negatives for correcting mistakes
+  })),
+  async (c) => {
+    const b = c.req.valid("json");
+    const day = b.day ?? today();
+    // Upsert then clamp to non-negative so a bad decrement can never underflow the total.
+    run(`INSERT INTO water(day,ml,updated_at) VALUES(?,?,?)
+         ON CONFLICT(day) DO UPDATE SET ml=MAX(0, water.ml + excluded.ml), updated_at=excluded.updated_at`,
+        day, Math.max(0, b.ml), now());
+    await syncDay(day);
+    return c.json({ ok: true });
+  });
 
 // ── weight ─────────────────────────────────────────────────────────────────────────────────────────
 app.get("/weight", (c) => {
@@ -898,13 +1558,41 @@ app.post("/meals",
     carbs_g:   z.number().nonnegative().optional(),
     fat_g:     z.number().nonnegative().optional(),
     note: z.string().optional(),
+    meal_type: z.enum(["breakfast", "lunch", "dinner", "snack"]).default("snack"),
   })),
   async (c) => {
     const m = c.req.valid("json");
-    run("INSERT INTO meals(ts,name,kcal,protein_g,carbs_g,fat_g,note) VALUES(?,?,?,?,?,?,?)",
-        now(), m.name, m.kcal, m.protein_g ?? null, m.carbs_g ?? null, m.fat_g ?? null, m.note ?? null);
+    run("INSERT INTO meals(ts,name,kcal,protein_g,carbs_g,fat_g,note,meal_type) VALUES(?,?,?,?,?,?,?,?)",
+        now(), m.name, m.kcal, m.protein_g ?? null, m.carbs_g ?? null, m.fat_g ?? null, m.note ?? null, m.meal_type);
     await syncDay(today());
     return c.json({ ok: true });
+  });
+
+app.post("/meals/estimate",
+  zValidator("json", z.object({
+    text: z.string().min(1),
+  })),
+  async (c) => {
+    try {
+      const cfg = getConfig();
+      if (!cfg) return c.json({ error: "LLM not configured." }, 400);
+
+      const prompt = `You are a nutrition expert. Estimate the nutritional content for this meal: "${c.req.valid("json").text}".
+Return ONLY a valid JSON object matching exactly this format:
+{"kcal": 450, "protein_g": 30, "carbs_g": 40, "fat_g": 15}
+Be realistic. Output ONLY the JSON.`;
+
+      const reply = await callChat(cfg, [
+        { role: "system", content: "You are a JSON-only bot. Output only valid JSON." },
+        { role: "user", content: prompt }
+      ]);
+
+      const jsonStr = reply.replace(/```json/g, "").replace(/```/g, "").trim();
+      const parsed = JSON.parse(jsonStr);
+      return c.json({ ok: true, data: parsed });
+    } catch (e: any) {
+      return c.json({ error: String(e?.message ?? e) }, 500);
+    }
   });
 app.delete("/meals/:id", async (c) => {
   const id = Number(c.req.param("id"));
@@ -1009,10 +1697,14 @@ app.get("/holdings/allocation", async (c) => {
     if (/\bsilver(bees|ietf)?\b/.test(s)) return "silver";
     if (/\b(debt|bond|gilt|liquid|income|overnight|corporate|epf|epfo|ppf|nps|provident|gsec|fd|rd)\b/.test(s)) return "debt";
     if (h.currency !== "INR") return "us_equity";
+    if (/\blarge\s*cap\b/.test(s)) return "indian_large_cap";
+    if (/\bmid\s*cap\b/.test(s)) return "indian_mid_cap";
+    if (/\bsmall\s*cap\b/.test(s)) return "indian_small_cap";
+    if (/\bflexi\s*cap\b/.test(s) || /\bmulti\s*cap\b/.test(s)) return "indian_flexi_cap";
     return "indian_equity";
   };
 
-  const totals: Record<string, number> = { indian_equity: 0, us_equity: 0, debt: 0, retirement: 0, gold: 0, silver: 0, crypto: 0 };
+  const totals: Record<string, number> = {};
   for (const h of holdings) {
     const cat = classify(h);
     const nativeValue = (h.manual_price ?? h.cost_basis) * h.shares;
@@ -1029,16 +1721,41 @@ app.get("/holdings/allocation", async (c) => {
   const debtHi = debtLo + 10;
   const indianEqLo = Math.max(20, equityTotal - usHi);
   const indianEqHi = Math.max(indianEqLo + 5, equityTotal - usLo);
+  const largeLo = Math.round(indianEqLo * 0.5);
+  const largeHi = Math.round(indianEqHi * 0.6);
+  const midLo   = Math.round(indianEqLo * 0.2);
+  const midHi   = Math.round(indianEqHi * 0.25);
+  const smallLo = Math.round(indianEqLo * 0.1);
+  const smallHi = Math.round(indianEqHi * 0.15);
+  const flexiLo = 0; const flexiHi = 20;
 
-  const catalogue: [string, string, number, number][] = [
-    ["indian_equity", "Indian equity",       indianEqLo, indianEqHi],
-    ["us_equity",     "International (US)",  usLo,       usHi],
+  let catalogue: [string, string, number, number][] = [
+    ["indian_large_cap", "Indian large cap", largeLo, largeHi],
+    ["indian_mid_cap",   "Indian mid cap",   midLo, midHi],
+    ["indian_small_cap", "Indian small cap", smallLo, smallHi],
+    ["indian_flexi_cap", "Indian flexi cap", flexiLo, flexiHi],
+    ["indian_equity",    "Indian equity (other)", 0, indianEqHi],
+    ["us_equity",        "International (US)",  usLo,       usHi],
     ["retirement",    "Retirement (EPF/PPF/NPS)", retireLo, retireHi],
     ["debt",          "Debt / fixed income", debtLo,     debtHi],
     ["gold",          "Gold",                goldLo,     goldHi],
     ["silver",        "Silver",              silverLo,   silverHi],
     ["crypto",        "Crypto",              cryptoLo,   cryptoHi],
   ];
+
+  // Ponytail lazy mode: omit sub-classes if they are all 0 so we don't clutter the UI with 0% targets
+  const hasSubclasses = totals["indian_large_cap"] || totals["indian_mid_cap"] || totals["indian_small_cap"] || totals["indian_flexi_cap"];
+  if (!hasSubclasses) {
+    catalogue = [
+      ["indian_equity", "Indian equity", indianEqLo, indianEqHi],
+      ["us_equity",     "International (US)",  usLo,       usHi],
+      ["retirement",    "Retirement (EPF/PPF/NPS)", retireLo, retireHi],
+      ["debt",          "Debt / fixed income", debtLo,     debtHi],
+      ["gold",          "Gold",                goldLo,     goldHi],
+      ["silver",        "Silver",              silverLo,   silverHi],
+      ["crypto",        "Crypto",              cryptoLo,   cryptoHi],
+    ];
+  }
 
   const rows = catalogue.map(([key, label, tLo, tHi]) => {
     const value = totals[key] ?? 0;
@@ -1061,7 +1778,8 @@ app.get("/holdings/allocation", async (c) => {
 app.post("/holdings/advisor", async (c) => {
   const cfg = getConfig();
   if (!cfg) return c.json({ error: "LLM not configured. Set one up in Settings." }, 400);
-  const { messages = [] } = await c.req.json();
+  const body = await c.req.json();
+  const { messages = [] } = body;
   if (!Array.isArray(messages) || messages.length === 0) return c.json({ error: "empty" }, 400);
 
   const holdings = q<any>("SELECT * FROM holdings");
@@ -1075,6 +1793,10 @@ app.post("/holdings/advisor", async (c) => {
     if (/\bsilver(bees|ietf)?\b/.test(s)) return "silver";
     if (/\b(debt|bond|gilt|liquid|income|overnight|corporate|epf|epfo|ppf|nps|provident|gsec|fd|rd)\b/.test(s)) return "debt";
     if (h.currency !== "INR") return "us_equity";
+    if (/\blarge\s*cap\b/.test(s)) return "indian_large_cap";
+    if (/\bmid\s*cap\b/.test(s)) return "indian_mid_cap";
+    if (/\bsmall\s*cap\b/.test(s)) return "indian_small_cap";
+    if (/\bflexi\s*cap\b/.test(s) || /\bmulti\s*cap\b/.test(s)) return "indian_flexi_cap";
     return "indian_equity";
   };
   const totals: Record<string, { value: number; native: string }> = {};
@@ -1093,6 +1815,14 @@ PORTFOLIO SNAPSHOT:
 ${JSON.stringify({ profile: { name: profile?.name, age, currency: profile?.currency ?? "INR", goal: profile?.goal, values: profile?.values_json }, allocation: totals, total_positions: holdings.length })}`;
 
   try {
+    if (body.stream) {
+      const { streamText } = await import("hono/streaming");
+      return streamText(c, async (stream) => {
+        try {
+          await callChat(cfg, [{ role: "system", content: followupPrompt }, ...messages], (text) => stream.write(text));
+        } catch (e: any) { stream.write("\n\n[Error: " + String(e?.message ?? e) + "]"); }
+      });
+    }
     const reply = await callChat(cfg, [
       { role: "system", content: followupPrompt },
       ...messages,
@@ -1126,6 +1856,10 @@ app.post("/holdings/advice", async (c) => {
     if (/\bsilver(bees|ietf)?\b/.test(s)) return "silver";
     if (/\b(debt|bond|gilt|liquid|income|overnight|corporate|epf|epfo|ppf|nps|provident|gsec|fd|rd)\b/.test(s)) return "debt";
     if (h.currency !== "INR") return "us_equity";
+    if (/\blarge\s*cap\b/.test(s)) return "indian_large_cap";
+    if (/\bmid\s*cap\b/.test(s)) return "indian_mid_cap";
+    if (/\bsmall\s*cap\b/.test(s)) return "indian_small_cap";
+    if (/\bflexi\s*cap\b/.test(s) || /\bmulti\s*cap\b/.test(s)) return "indian_flexi_cap";
     return "indian_equity";
   };
   const totals: Record<string, { value: number; native: string }> = {};
@@ -1193,6 +1927,18 @@ One-line disclaimer.
 R7. Under 250 words. Use ₹. Warm, direct, honest. No fabricated numbers.`;
 
   try {
+    if (body.stream) {
+      const { streamText } = await import("hono/streaming");
+      return streamText(c, async (stream) => {
+        try {
+          const full = await callChat(cfg, [
+            { role: "system", content: systemPrompt },
+            { role: "user",   content: `PORTFOLIO SNAPSHOT:\n${JSON.stringify(snapshot, null, 2)}` },
+          ], (text) => stream.write(text));
+          adviceCache = { at: Date.now(), advice: full };
+        } catch (e: any) { stream.write("\n\n[Error: " + String(e?.message ?? e) + "]"); }
+      });
+    }
     const reply = await callChat(cfg, [
       { role: "system", content: systemPrompt },
       { role: "user",   content: `PORTFOLIO SNAPSHOT:\n${JSON.stringify(snapshot, null, 2)}` },
@@ -1236,7 +1982,15 @@ async function yahooSearch(query: string): Promise<string | null> {
   } catch { return null; }
 }
 
+let yahooCache: Record<string, { data: { price: number; prevClose: number; currency: string }; at: number }> = {};
+
 app.get("/holdings", async (c) => {
+  const force = c.req.query("force") === "1";
+  if (force) {
+    yahooCache = {};
+    amfiCache = null;
+  }
+
   applyMonthlyContributions();          // catch up missed months before we read
   const holdings = q<any>("SELECT * FROM holdings ORDER BY symbol");
   if (holdings.length === 0) return c.json({ holdings: [], total: 0, cost: 0, gain: 0, grand: null });
@@ -1246,19 +2000,34 @@ app.get("/holdings", async (c) => {
   const yahooTargets = holdings.filter(h => h.kind !== "mf").map(h => h.symbol);
   const mfHoldings   = holdings.filter(h => h.kind === "mf");
 
-  const yahooEntries = await Promise.all([...new Set(yahooTargets)].map(async (sym): Promise<[string, { price: number; currency: string } | null]> => {
+  const nowMs = Date.now();
+  const yahooEntries = await Promise.all([...new Set(yahooTargets)].map(async (sym): Promise<[string, { price: number; prevClose: number; currency: string } | null]> => {
+    if (yahooCache[sym] && nowMs - yahooCache[sym].at < 15_000) {
+      return [sym, yahooCache[sym].data];
+    }
     try {
+      // Rotate user-agent slightly to avoid harsh rate limits
+      const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
       const r = await fetch(
         `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1d`,
-        { headers: { "User-Agent": "Mozilla/5.0 LifeOS" }, signal: AbortSignal.timeout(5000) });
-      if (!r.ok) return [sym, null];
+        { headers: { "User-Agent": ua }, signal: AbortSignal.timeout(5000) });
+      if (!r.ok) {
+        // Use stale cache if available when rate limited
+        if (yahooCache[sym]) return [sym, yahooCache[sym].data];
+        return [sym, null];
+      }
       const j = await r.json() as any;
       const meta = j?.chart?.result?.[0]?.meta;
       if (!meta?.regularMarketPrice) return [sym, null];
-      return [sym, { price: meta.regularMarketPrice, currency: meta.currency ?? "USD" }];
-    } catch { return [sym, null]; }
+      const data = { price: meta.regularMarketPrice, prevClose: meta.chartPreviousClose ?? meta.regularMarketPrice, currency: meta.currency ?? "USD" };
+      yahooCache[sym] = { data, at: nowMs };
+      return [sym, data];
+    } catch { 
+      if (yahooCache[sym]) return [sym, yahooCache[sym].data];
+      return [sym, null]; 
+    }
   }));
-  const prices: Record<string, { price: number; currency: string }> = {};
+  const prices: Record<string, { price: number; prevClose?: number; currency: string }> = {};
   for (const [sym, p] of yahooEntries) if (p) prices[sym] = p;
 
   // AMFI NAV lookup for MFs (India-only).
@@ -1266,20 +2035,24 @@ app.get("/holdings", async (c) => {
   if (amfi) {
     for (const h of mfHoldings) {
       const scheme = findAmfiScheme(amfi, h.symbol) || (h.note && findAmfiScheme(amfi, h.note));
-      if (scheme) prices[h.symbol] = { price: scheme.nav, currency: "INR" };
+      if (scheme) prices[h.symbol] = { price: scheme.nav, prevClose: scheme.nav, currency: "INR" };
     }
   }
 
   const enriched = holdings.map(h => {
     const yahoo = prices[h.symbol];
     const price = yahoo?.price || h.manual_price || h.cost_basis;
+    const prevClose = yahoo?.prevClose || price;
     const value = price * h.shares;
     const cost  = h.cost_basis * h.shares;
+    const daily_gain = (price - prevClose) * h.shares;
     return {
       ...h,
       price, value, cost,
       gain: value - cost,
       gain_pct: cost > 0 ? ((value - cost) / cost) * 100 : 0,
+      daily_gain,
+      daily_gain_pct: prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0,
       quote_currency: yahoo?.currency ?? h.currency,
       price_source: yahoo ? (h.kind === "mf" ? "amfi" : "live") : (h.manual_price ? "report" : "cost"),
     };
@@ -1296,12 +2069,27 @@ app.get("/holdings", async (c) => {
         currency: targetCcy,
         value: enriched.reduce((s, h) => s + convert(h.value, h.currency, targetCcy, rates), 0),
         cost:  enriched.reduce((s, h) => s + convert(h.cost,  h.currency, targetCcy, rates), 0),
+        daily_gain: enriched.reduce((s, h) => s + convert(h.daily_gain || 0, h.currency, targetCcy, rates), 0),
       }
     : null;
+
+  function isMarketLive(tz: string, startH: number, startM: number, endH: number, endM: number) {
+    const d = new Date(new Date().toLocaleString("en-US", { timeZone: tz }));
+    const day = d.getDay();
+    if (day === 0 || day === 6) return false;
+    const totalM = d.getHours() * 60 + d.getMinutes();
+    return totalM >= (startH * 60 + startM) && totalM < (endH * 60 + endM);
+  }
+
+  const market_live = {
+    in: isMarketLive("Asia/Kolkata", 9, 15, 15, 30),
+    us: isMarketLive("America/New_York", 9, 30, 16, 0),
+  };
 
   return c.json({
     holdings: enriched, total, cost, gain: total - cost,
     grand: grand ? { ...grand, gain: grand.value - grand.cost, pct: grand.cost > 0 ? ((grand.value - grand.cost) / grand.cost) * 100 : 0 } : null,
+    market_live,
     fx_ok: !!rates,
   });
 });
@@ -1460,6 +2248,104 @@ app.patch("/holdings/:id",
     return c.json({ ok: true });
   });
 
+app.post("/holdings/sync-gmail", async (c) => {
+  try {
+    const token = await googleGetAccessToken();
+    const cfg = getConfig();
+    if (!cfg) throw new Error("LLM not configured. Required for parsing emails.");
+
+    const query = "from:(groww.in OR indmoney) (subject:order OR subject:sip OR subject:successful OR subject:contract)";
+    const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=5`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!r.ok) throw new Error(`Gmail API failed: ${r.status}`);
+    const data = await r.json() as any;
+    const messages = data.messages || [];
+    
+    if (messages.length === 0) return c.json({ ok: true, imported: 0 });
+
+    let imported = 0;
+    
+    for (const msg of messages) {
+      const mr = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!mr.ok) continue;
+      const mData = await mr.json() as any;
+      
+      let bodyText = "";
+      const getBody = (parts: any[]) => {
+        for (const p of parts) {
+          if (p.mimeType === "text/plain" && p.body?.data) {
+             bodyText += Buffer.from(p.body.data, 'base64').toString("utf8");
+          } else if (p.parts) {
+             getBody(p.parts);
+          }
+        }
+      };
+      if (mData.payload?.parts) getBody(mData.payload.parts);
+      else if (mData.payload?.body?.data) bodyText = Buffer.from(mData.payload.body.data, 'base64').toString("utf8");
+      
+      if (!bodyText) continue;
+
+      // ── Local Regex Extraction (No LLM, 100% Private) ──
+      const text = bodyText.replace(/\r?\n/g, " ");
+      let matched = false;
+
+      // Pattern 1: Groww Mutual Fund SIP/Order
+      // e.g., "Scheme Name: Parag Parikh Flexi Cap Fund Direct Growth Amount: ₹5,000 NAV: 75.43 Units: 66.28"
+      const mfRegex = /(?:Scheme Name|Fund Name)[\s:]*([A-Za-z0-9\s\-&]+?)(?:Amount|Invested)[\s:]*[₹$]?([\d,]+(?:\.\d+)?).*?NAV[\s:]*([\d,]+(?:\.\d+)?)/i;
+      const mfMatch = text.match(mfRegex);
+      if (mfMatch) {
+        const symbol = mfMatch[1]!.trim();
+        const cost_basis = parseFloat(mfMatch[3]!.replace(/,/g, ""));
+        const amount = parseFloat(mfMatch[2]!.replace(/,/g, ""));
+        if (symbol && !isNaN(cost_basis) && !isNaN(amount) && cost_basis > 0) {
+          const shares = amount / cost_basis;
+          applyTrade(symbol, "mf", shares, cost_basis, "INR", "Gmail Import: Groww MF");
+          imported++;
+          matched = true;
+        }
+      }
+
+      // Pattern 2: Groww/Indmoney Stock Buy
+      // e.g., "Bought 10 shares of AAPL at $150.50" or "bought 10 shares of RELIANCE at ₹2,500"
+      if (!matched) {
+        const stockRegex = /(?:bought|buy).*?([\d,]+(?:\.\d+)?)\s+(?:shares|qty|quantity)\s+(?:of\s+)?([A-Z0-9.\- ]+?)\s+(?:at|@|average price).*?(?:[₹$]|rs\.?|inr|usd)?\s*([\d,]+(?:\.\d+)?)/i;
+        const stockMatch = text.match(stockRegex);
+        if (stockMatch) {
+          const shares = parseFloat(stockMatch[1]!.replace(/,/g, ""));
+          const symbol = stockMatch[2]!.trim();
+          const cost_basis = parseFloat(stockMatch[3]!.replace(/,/g, ""));
+          const currency = (text.includes("$") || text.includes("USD") || !text.includes("₹")) && !text.toLowerCase().includes("rs") ? "USD" : "INR";
+          if (symbol && !isNaN(shares) && !isNaN(cost_basis)) {
+            const kind = /ETF|BEES/i.test(symbol) ? "etf" : "stock";
+            applyTrade(symbol, kind, shares, cost_basis, currency, "Gmail Import: Stock");
+            imported++;
+            matched = true;
+          }
+        }
+      }
+    }
+    
+    return c.json({ ok: true, imported });
+  } catch (e: any) {
+    return c.json({ error: String(e?.message ?? e) }, 500);
+  }
+});
+
+function applyTrade(symbol: string, kind: string, shares: number, cost_basis: number, currency: string, note: string) {
+  const existing = q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE symbol=?", symbol.toUpperCase());
+  if (existing) {
+    const newShares = existing.shares + shares;
+    const newCost = ((existing.shares * existing.cost_basis) + (shares * cost_basis)) / newShares;
+    run("UPDATE holdings SET shares=?, cost_basis=? WHERE id=?", newShares, newCost, existing.id);
+  } else {
+    run("INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,created_at) VALUES(?,?,?,?,?,?,?)",
+        symbol.toUpperCase(), kind, shares, cost_basis, currency, note, now());
+  }
+}
+
 // Broker report import (Groww Stocks / MF for now)
 app.post("/holdings/import", async (c) => {
   const form = await c.req.formData();
@@ -1537,6 +2423,7 @@ app.put("/llm/config",
     model: z.string().min(1),
     base_url: z.string().nullable().optional(),
     auth_type: z.enum(["api_key", "oauth"]).default("api_key").optional(),
+    context_days: z.number().min(1).max(365).optional().default(30),
   })),
   (c) => {
     const b = c.req.valid("json");
@@ -1544,13 +2431,15 @@ app.put("/llm/config",
     const existing = getConfig();
     const apiKey = b.api_key !== undefined ? (b.api_key || null) : (existing?.api_key ?? null);
     const authType = b.auth_type ?? existing?.auth_type ?? "api_key";
-    run(`INSERT INTO llm_config(id,provider,api_key,model,base_url,auth_type,updated_at)
-         VALUES(1,?,?,?,?,?,?)
+    const contextDays = b.context_days ?? (existing as any)?.context_days ?? 30;
+    
+    run(`INSERT INTO llm_config(id,provider,api_key,model,base_url,auth_type,context_days,updated_at)
+         VALUES(1,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
            provider=excluded.provider, api_key=excluded.api_key,
            model=excluded.model, base_url=excluded.base_url,
-           auth_type=excluded.auth_type, updated_at=excluded.updated_at`,
-        b.provider, apiKey, b.model, b.base_url ?? null, authType, now());
+           auth_type=excluded.auth_type, context_days=excluded.context_days, updated_at=excluded.updated_at`,
+        b.provider, apiKey, b.model, b.base_url ?? null, authType, contextDays, now());
     return c.json({ ok: true });
   });
 
@@ -1587,6 +2476,7 @@ app.get("/auth/status", (c) => {
   return c.json({
     github_copilot: !!getToken("github_copilot")?.refresh_token,
     anthropic:      !!getToken("anthropic")?.refresh_token,
+    google:         !!getToken("google")?.refresh_token || !!getToken("google")?.access_token,
   });
 });
 
@@ -1594,6 +2484,21 @@ app.post("/auth/:provider/logout", (c) => {
   clearToken(c.req.param("provider"));
   return c.json({ ok: true });
 });
+
+app.post("/auth/google/exchange",
+  zValidator("json", z.object({
+    code: z.string().min(1),
+    redirect_uri: z.string().min(1),
+  })),
+  async (c) => {
+    try {
+      const { code, redirect_uri } = c.req.valid("json");
+      await googleExchangeCode(code, redirect_uri);
+      return c.json({ ok: true });
+    } catch (e: any) {
+      return c.json({ error: String(e?.message ?? e) }, 500);
+    }
+  });
 
 // ── OAuth: Anthropic Claude Pro/Max ───────────────────────────────────────────────
 app.post("/auth/anthropic/start", (c) => {
@@ -1715,6 +2620,40 @@ app.post("/dev/seed", async (c) => {
   return c.json({ ok: true, seeded_days: daysBack });
 });
 
+// ── export / import backup ──────────────────────────────────────────────────────────────────
+app.get("/dev/export", async (c) => {
+  const file = Bun.file(process.env.DB_PATH ?? "./lifeos.db");
+  const arrayBuffer = await file.arrayBuffer();
+  c.header("Content-Type", "application/octet-stream");
+  c.header("Content-Disposition", `attachment; filename="lifeos_backup_${today()}.db"`);
+  return c.body(arrayBuffer);
+});
+
+app.post("/dev/import", async (c) => {
+  const form = await c.req.formData();
+  const file = form.get("file") as File | null;
+  if (!file) return c.json({ error: "file missing" }, 400);
+
+  const dbPath = process.env.DB_PATH ?? "./lifeos.db";
+  
+  // Close existing connection so we can safely overwrite the file
+  db.close();
+  
+  const buf = await file.arrayBuffer();
+  await Bun.write(dbPath, buf);
+  
+  // Clean up WAL/SHM files to prevent corruption with the new DB file
+  try { import("node:fs").then(fs => {
+    if (fs.existsSync(dbPath + "-wal")) fs.unlinkSync(dbPath + "-wal");
+    if (fs.existsSync(dbPath + "-shm")) fs.unlinkSync(dbPath + "-shm");
+  })} catch {}
+
+  // The process needs to restart to pick up the new DB file since the connection is closed
+  setTimeout(() => process.exit(0), 500);
+
+  return c.json({ ok: true, message: "Database imported. Server is restarting..." });
+});
+
 // ── clear demo data (careful) ────────────────────────────────────────────────────────────────
 app.post("/dev/wipe", (c) => {
   for (const t of ["transactions","moods","mood2d","time_sessions","tasks","sleep","weight","meals","wins","gratitudes","habit_logs","journals"]) {
@@ -1724,5 +2663,15 @@ app.post("/dev/wipe", (c) => {
 });
 
 const port = Number(process.env.PORT ?? 8787);
-console.log(`⚡ LifeOS backend on http://127.0.0.1:${port}`);
-export default { port, fetch: app.fetch };
+// Bind to loopback only. Set LIFEOS_BIND=0.0.0.0 in .env to expose on the LAN/tailnet.
+const hostname = process.env.LIFEOS_BIND ?? "127.0.0.1";
+console.log(`⚡ LifeOS backend on http://${hostname}:${port}`);
+if (hostname !== "127.0.0.1" && !LIFEOS_TOKEN) {
+  console.warn(`
+⚠️  WARNING: LifeOS is bound to ${hostname} but LIFEOS_TOKEN is NOT set.
+    Anything that can reach this port can read your journal, spend your LLM quota,
+    and delete your data. Set LIFEOS_TOKEN in backend/.env before exposing.
+    Generate one with:  openssl rand -hex 32
+`);
+}
+export default { port, hostname, fetch: app.fetch };

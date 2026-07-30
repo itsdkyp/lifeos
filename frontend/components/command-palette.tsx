@@ -21,6 +21,7 @@ import { X, ArrowRight } from "lucide-react";
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (b: boolean) => void }) {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<{ kind: "idle" | "ok" | "err"; text?: string }>({ kind: "idle" });
+  const [saving, setSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -36,14 +37,22 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 
   async function submit() {
     const text = q.trim();
-    if (!text) return;
+    if (!text || saving) return;
+    setSaving(true);
+    setStatus({ kind: "idle" });
     try {
       const msg = await parseAndDispatch(text);
       setStatus({ kind: "ok", text: msg });
       setQ("");
-      setTimeout(() => onOpenChange(false), 700);
+      setTimeout(() => {
+        onOpenChange(false);
+        // Force refresh the active page so any charts/budgets/lists instantly reflect the new data
+        window.location.reload();
+      }, 1500);
     } catch (e: any) {
       setStatus({ kind: "err", text: e?.message ?? "Could not parse. Try `spent 12 lunch` or `mood 8 6`." });
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -58,11 +67,12 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
           <input ref={inputRef} value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}
+            disabled={saving}
             placeholder="log anything… (spent 12 lunch, mood 8 6 focused, task buy milk tomorrow)"
-            className="flex-1 bg-transparent outline-none text-sm placeholder:text-muted-foreground" />
-          <button onClick={submit}
-            className="rounded-md bg-primary text-primary-foreground px-2 py-1 text-xs flex items-center gap-1 hover:opacity-90">
-            log <ArrowRight className="h-3 w-3" />
+            className="flex-1 bg-transparent outline-none text-sm placeholder:text-muted-foreground disabled:opacity-50" />
+          <button onClick={submit} disabled={saving}
+            className="rounded-md bg-primary text-primary-foreground px-2 py-1 text-xs flex items-center gap-1 hover:opacity-90 disabled:opacity-50 transition-opacity">
+            {saving ? <span className="animate-pulse">saving...</span> : <>log <ArrowRight className="h-3 w-3" /></>}
           </button>
           <button onClick={() => onOpenChange(false)} className="text-muted-foreground hover:text-foreground">
             <X className="h-4 w-4" />
@@ -70,8 +80,9 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         </div>
 
         <div className="px-4 py-3 text-xs text-muted-foreground space-y-1">
-          <div>{status.kind === "ok"  && <span className="text-emerald-500">✓ {status.text}</span>}</div>
-          <div>{status.kind === "err" && <span className="text-destructive">! {status.text}</span>}</div>
+          {saving && status.kind === "idle" && <div className="text-primary animate-pulse flex items-center gap-2">Thinking...</div>}
+          <div>{status.kind === "ok"  && <span className="text-emerald-500 font-medium">✓ {status.text}</span>}</div>
+          <div>{status.kind === "err" && <span className="text-destructive font-medium">! {status.text}</span>}</div>
           <div className="pt-2 border-t border-border grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 font-mono">
             <span><b className="text-foreground">spent</b> 12 lunch food</span>
             <span><b className="text-foreground">mood</b> 8 6 focused</span>
@@ -245,7 +256,15 @@ async function parseAndDispatch(input: string): Promise<string> {
     return "journal appended";
   }
 
-  throw new Error(`unknown: "${cmd}". Try one of: spent, mood, task, win, grateful, sleep, habit, start, stop, journal.`);
+  // If no fast local regex match, send to LLM for natural language intent parsing
+  try {
+    const res = await api.chat(input);
+    if (res.answer) return res.answer;
+  } catch (e) {
+    // Ignore error and fall through to default error message
+  }
+
+  throw new Error(`unknown: "${cmd}". Try "spent 12 lunch" or use natural language!`);
 }
 
 function clamp(n: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, n)); }

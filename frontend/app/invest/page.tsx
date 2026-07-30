@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type HoldingsResp, type Holding } from "@/lib/api";
 import { Card } from "@/components/card";
-import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, ChevronDown } from "lucide-react";
+import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, ChevronDown, CalendarPlus, Mail } from "lucide-react";
 import { useProfile, currencySymbol } from "@/lib/profile";
 import { cn } from "@/lib/utils";
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
@@ -64,7 +64,8 @@ function bucketize(holdings: Holding[]): Bucket[] {
 function bucketTotals(hs: Holding[]) {
   const value = hs.reduce((s, h) => s + h.value, 0);
   const cost  = hs.reduce((s, h) => s + h.cost,  0);
-  return { value, cost, gain: value - cost, pct: cost > 0 ? ((value - cost) / cost) * 100 : 0 };
+  const daily_gain = hs.reduce((s, h) => s + (h.daily_gain ?? 0), 0);
+  return { value, cost, gain: value - cost, pct: cost > 0 ? ((value - cost) / cost) * 100 : 0, daily_gain };
 }
 
 export default function Page() {
@@ -74,8 +75,17 @@ export default function Page() {
   const { profile } = useProfile();
   const psym = currencySymbol(profile?.currency);
 
-  const load = () => { setLoading(true); api.holdings().then(setData).catch(() => {}).finally(() => setLoading(false)); };
-  useEffect(() => { load(); const id = setInterval(load, 60_000); return () => clearInterval(id); }, []);
+  const load = (force = false) => { setLoading(true); api.holdings(force).then(setData).catch(() => {}).finally(() => setLoading(false)); };
+  
+  useEffect(() => { load(); }, []);
+
+  const isLive = data?.market_live?.in || data?.market_live?.us;
+  const intervalMs = isLive ? 15_000 : 60_000;
+  
+  useEffect(() => {
+    const id = setInterval(() => load(false), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
 
   const buckets = data ? bucketize(data.holdings) : [];
 
@@ -123,7 +133,16 @@ export default function Page() {
           .sort((a, b) => b.holdings.length - a.holdings.length)
           .map(b => (
             <div key={b.title} className="mb-4">
-              <BucketCard bucket={b} onDelete={async id => { await api.holdingDelete(id); load(); }} />
+              <BucketCard bucket={b} 
+                onDelete={async id => { await api.holdingDelete(id); load(); }} 
+                onEditSip={async (id, current) => {
+                  const v = window.prompt("Monthly contribution (leave blank to clear):", current?.toString() ?? "");
+                  if (v === null) return;
+                  const num = parseFloat(v);
+                  await api.holdingPatch(id, { monthly_contribution: isNaN(num) ? null : num } as any);
+                  load();
+                }}
+              />
             </div>
           ))}
       </Masonry>
@@ -147,23 +166,49 @@ export default function Page() {
   );
 }
 
-function Header({ data, loading, onRefresh, psym }: { data: HoldingsResp | null; loading: boolean; onRefresh: () => void; psym: string }) {
+function Header({ data, loading, onRefresh, psym }: { data: HoldingsResp | null; loading: boolean; onRefresh: (force: boolean) => void; psym: string }) {
+  const liveIn = data?.market_live?.in;
+  const liveUs = data?.market_live?.us;
+  const [syncingGmail, setSyncingGmail] = useState(false);
+
   return (
     <header className="flex flex-wrap items-baseline justify-between gap-2">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Investments</h1>
-        <p className="text-xs text-muted-foreground">Prices via Yahoo (stocks/ETFs/crypto) + AMFI (Indian MFs) · FX live · totals in {psym}.</p>
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Investments</h1>
+          {(liveIn || liveUs) && (
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 text-[10px] uppercase font-bold tracking-wider">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              {liveIn && liveUs ? "Markets live" : liveIn ? "IN Market live" : "US Market live"}
+            </div>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">Prices via Yahoo (stocks/ETFs/crypto) + AMFI (Indian MFs) · FX live · totals in {psym}.</p>
       </div>
-      <div className="flex gap-2 items-center">
-        <button onClick={onRefresh} disabled={loading}
+      <div className="flex gap-2 items-center flex-wrap">
+        <button onClick={() => onRefresh(true)} disabled={loading}
           className="rounded-md bg-secondary/50 hover:bg-secondary px-3 py-1.5 text-xs flex items-center gap-1">
           <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} /> Refresh
         </button>
         <button onClick={async () => {
-          try { const r = await api.holdingsResolve(); alert(`Resolved ${r.resolved}/${r.tried} tickers.`); onRefresh(); }
+          try { const r = await api.holdingsResolve(); alert(`Resolved ${r.resolved}/${r.tried} tickers.`); onRefresh(true); }
           catch (e: any) { alert(String(e.message ?? e)); }
         }} className="rounded-md bg-secondary/50 hover:bg-secondary px-3 py-1.5 text-xs">
           Auto-resolve tickers
+        </button>
+        <button onClick={async () => {
+          setSyncingGmail(true);
+          try { 
+            const r = await api.holdingsSyncGmail(); 
+            alert(`Synced from Gmail: ${r.imported} trades added.`); 
+            onRefresh(true); 
+          } catch (e: any) { alert(String(e.message ?? e)); }
+          finally { setSyncingGmail(false); }
+        }} disabled={syncingGmail} className="rounded-md bg-secondary/50 hover:bg-secondary px-3 py-1.5 text-xs flex items-center gap-1">
+          <Mail className={cn("h-3.5 w-3.5", syncingGmail && "animate-pulse")} /> Sync Gmail
         </button>
         <label className="rounded-md bg-primary text-primary-foreground hover:opacity-90 px-3 py-1.5 text-xs cursor-pointer flex items-center gap-1">
           <Plus className="h-3.5 w-3.5" /> Import Groww / Ind Money
@@ -175,7 +220,7 @@ function Header({ data, loading, onRefresh, psym }: { data: HoldingsResp | null;
               if (r.skipped)      bits.push(`skipped ${r.skipped}`);
               if (r.consolidated) bits.push(`consolidated ${r.consolidated} manual duplicate${r.consolidated > 1 ? "s" : ""}`);
               alert(bits.join(" · ") + ".");
-              onRefresh();
+              onRefresh(true);
             } catch (err: any) { alert(String(err.message ?? err)); }
             e.target.value = "";
           }} />
@@ -188,10 +233,17 @@ function Header({ data, loading, onRefresh, psym }: { data: HoldingsResp | null;
 function GrandStrip({ data, psym }: { data: HoldingsResp; psym: string }) {
   const g = data.grand!;
   return (
-    <div className="rounded-2xl border border-primary/30 bg-primary/5 backdrop-blur px-5 py-4 grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+    <div className="rounded-2xl border border-primary/30 bg-primary/5 backdrop-blur px-5 py-4 grid grid-cols-1 sm:grid-cols-4 gap-3 sm:gap-4">
       <div>
         <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Total value</div>
         <div className="text-xl sm:text-2xl font-semibold tabular-nums">{psym}{Math.round(g.value).toLocaleString()}</div>
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Today's P&amp;L</div>
+        <div className={cn("text-xl sm:text-2xl font-semibold tabular-nums",
+          (g.daily_gain ?? 0) >= 0 ? "text-emerald-500" : "text-destructive")}>
+          {(g.daily_gain ?? 0) >= 0 ? "+" : ""}{psym}{Math.round(g.daily_gain ?? 0).toLocaleString()}
+        </div>
       </div>
       <div>
         <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Cost basis</div>
@@ -260,7 +312,7 @@ function BucketBarsCard({ buckets, psym }: { buckets: Bucket[]; psym: string }) 
   );
 }
 
-function BucketCard({ bucket, onDelete }: { bucket: Bucket; onDelete: (id: number) => void }) {
+function BucketCard({ bucket, onDelete, onEditSip }: { bucket: Bucket; onDelete: (id: number) => void; onEditSip?: (id: number, current?: number) => void }) {
   const sym = currencySymbol(bucket.currency);
   const t = bucketTotals(bucket.holdings);
   return (
@@ -270,8 +322,13 @@ function BucketCard({ bucket, onDelete }: { bucket: Bucket; onDelete: (id: numbe
           <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{bucket.title}</div>
           <div className="text-lg font-semibold tabular-nums">{sym}{Math.round(t.value).toLocaleString()}</div>
         </div>
-        <div className={cn("text-xs tabular-nums", t.gain >= 0 ? "text-emerald-500" : "text-destructive")}>
-          {t.gain >= 0 ? "+" : ""}{sym}{Math.round(t.gain).toLocaleString()} ({t.pct.toFixed(1)}%)
+        <div className="text-right">
+          <div className={cn("text-xs tabular-nums font-medium", t.daily_gain >= 0 ? "text-emerald-500" : "text-destructive")}>
+            {t.daily_gain >= 0 ? "+" : ""}{sym}{Math.round(t.daily_gain).toLocaleString()} today
+          </div>
+          <div className={cn("text-[10px] tabular-nums", t.gain >= 0 ? "text-emerald-500/80" : "text-destructive/80")}>
+            {t.gain >= 0 ? "+" : ""}{sym}{Math.round(t.gain).toLocaleString()} ({t.pct.toFixed(1)}%) total
+          </div>
         </div>
       </div>
       <div className="divide-y divide-border -mx-2 max-h-[22rem] overflow-y-auto">
@@ -287,14 +344,30 @@ function BucketCard({ bucket, onDelete }: { bucket: Bucket; onDelete: (id: numbe
             </div>
             <div className="text-right shrink-0">
               <div className="tabular-nums">{sym}{Math.round(h.value).toLocaleString()}</div>
-              <div className={cn("text-[11px] tabular-nums", h.gain >= 0 ? "text-emerald-500" : "text-destructive")}>
-                {h.gain >= 0 ? "+" : ""}{h.gain_pct.toFixed(1)}%
+              <div className="flex items-center justify-end gap-1.5">
+                {h.daily_gain_pct != null && h.daily_gain_pct !== 0 && (
+                  <div className={cn("text-[10px] tabular-nums font-medium", h.daily_gain_pct >= 0 ? "text-emerald-500" : "text-destructive")}>
+                    {h.daily_gain_pct >= 0 ? "↑" : "↓"} {Math.abs(h.daily_gain_pct).toFixed(1)}%
+                  </div>
+                )}
+                <div className={cn("text-[10px] tabular-nums", h.gain >= 0 ? "text-emerald-500/80" : "text-destructive/80")}>
+                  ({h.gain >= 0 ? "+" : ""}{h.gain_pct.toFixed(1)}% total)
+                </div>
               </div>
             </div>
-            <button onClick={() => onDelete(h.id)}
-              className="opacity-30 hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {onEditSip && (h.kind === "mf" || (h.kind as any) === "debt") && (
+                <button onClick={() => onEditSip(h.id, h.monthly_contribution)}
+                  className={cn("opacity-30 hover:opacity-100 shrink-0", h.monthly_contribution ? "text-primary opacity-80" : "text-muted-foreground")}
+                  title={`Monthly contribution: ${h.monthly_contribution ? sym + h.monthly_contribution : "None"}`}>
+                  <CalendarPlus className="h-3.5 w-3.5" />
+                </button>
+              )}
+              <button onClick={() => onDelete(h.id)}
+                className="opacity-30 hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         ))}
       </div>

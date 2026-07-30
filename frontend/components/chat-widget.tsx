@@ -5,7 +5,7 @@ import { X, Send, MessageSquare } from "lucide-react";
 
 type Msg = { role: "user" | "assistant"; content: string };
 
-export function ChatWidget() {
+export function ChatWidget({ onAction }: { onAction?: () => void }) {
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [q, setQ] = useState("");
@@ -19,12 +19,26 @@ export function ChatWidget() {
   async function send() {
     const text = q.trim(); if (!text || busy) return;
     setQ(""); setBusy(true);
-    setMsgs(m => [...m, { role: "user", content: text }]);
+    setMsgs(m => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
     try {
-      const { answer } = await api.chat(text);
-      setMsgs(m => [...m, { role: "assistant", content: answer }]);
+      await api.chat(text, undefined, (chunk) => {
+        setMsgs(prev => {
+          const newMsgs = [...prev];
+          const last = newMsgs[newMsgs.length - 1]!;
+          if (last.role === "assistant") {
+            last.content += chunk;
+          }
+          return newMsgs;
+        });
+      });
+      if (onAction) onAction();
     } catch (e: any) {
-      setMsgs(m => [...m, { role: "assistant", content: `Error: ${e.message}` }]);
+      setMsgs(m => {
+        const newMsgs = [...m];
+        const last = newMsgs[newMsgs.length - 1]!;
+        if (last.role === "assistant") last.content = `Error: ${e.message}`;
+        return newMsgs;
+      });
     } finally { setBusy(false); }
   }
 

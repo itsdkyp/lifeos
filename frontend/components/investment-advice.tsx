@@ -23,10 +23,10 @@ export function InvestmentAdvice() {
 
   async function generateInitial(force = false) {
     setLoading(true); setError("");
+    setInitial(""); // clear so we can see stream
     try {
-      const r = await api.holdingsAdvice(force);
+      const r = await api.holdingsAdvice(force, (chunk) => setInitial(prev => (prev || "") + chunk));
       if (r.error) setError(r.error);
-      else setInitial(r.advice ?? "");
     } catch (e: any) { setError(String(e.message ?? e)); }
     finally { setLoading(false); }
   }
@@ -34,12 +34,18 @@ export function InvestmentAdvice() {
   async function send() {
     const text = input.trim(); if (!text || loading) return;
     setInput(""); setLoading(true); setError("");
-    const nextMsgs: Msg[] = [...msgs, { role: "user", content: text }];
+    const nextMsgs: Msg[] = [...msgs, { role: "user", content: text }, { role: "assistant", content: "" }];
     setMsgs(nextMsgs);
     try {
-      const r = await api.holdingsAdvisor(nextMsgs);
+      const r = await api.holdingsAdvisor(nextMsgs.slice(0, -1), (chunk) => {
+        setMsgs(prev => {
+          const m = [...prev];
+          const last = m[m.length - 1]!;
+          if (last.role === "assistant") last.content += chunk;
+          return m;
+        });
+      });
       if (r.error) setError(r.error);
-      else setMsgs([...nextMsgs, { role: "assistant", content: r.answer ?? "" }]);
     } catch (e: any) { setError(String(e.message ?? e)); }
     finally { setLoading(false); }
   }
