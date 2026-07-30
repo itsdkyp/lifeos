@@ -326,7 +326,8 @@ async function run() {
   }
 
   // ── LLM config: verify context_days is now persisted end-to-end ─────────
-  {
+  // Only meaningful when the LLM is actually configured (row in llm_config exists).
+  if (llmConfigured) {
     const r = await req("/llm/config");
     check("LLM config returns context_days (Phase 1 fix)",
       typeof r.body?.context_days === "number",
