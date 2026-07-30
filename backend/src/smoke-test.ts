@@ -251,6 +251,12 @@ async function run() {
   }
 
   // ── LLM chat: intent parsing (P0-4 fixed habit_logs schema) ─────────────
+  // Skip LLM-dependent tests when no LLM is configured (e.g. CI without secrets).
+  const llmCfg = await req("/llm/config");
+  const llmConfigured = llmCfg.status === 200 && llmCfg.body !== null;
+  if (!llmConfigured) console.log("⏭  LLM not configured — skipping 4 LLM tests");
+
+  if (llmConfigured) {
   {
     const r = await req("/chat", { method: "POST", body: JSON.stringify({
       q: `log habit ${`TestHabit_${TAG}`.slice(0, 20)}`
@@ -299,6 +305,7 @@ async function run() {
       r.status === 200 && typeof r.body?.answer === "string" && r.body.answer.length > 0,
       String(r.body?.answer ?? r.body?.error).slice(0, 100));
   }
+  } // end if (llmConfigured)
 
   // ── summary + stats ───────────────────────────────────────────────────────
   {
@@ -313,8 +320,9 @@ async function run() {
   }
   {
     const r = await req("/finance/budget");
-    check("GET /finance/budget returns pacing data",
-      r.status === 200 && ("budget" in (r.body ?? {})));
+    // Fresh install with no monthly_budget = null response. Valid state.
+    check("GET /finance/budget returns pacing data or null",
+      r.status === 200 && (r.body === null || "budget" in (r.body ?? {})));
   }
 
   // ── LLM config: verify context_days is now persisted end-to-end ─────────

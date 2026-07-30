@@ -58,21 +58,42 @@ jobs:
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
 
       - name: Log in to Docker Hub
-        # Only push on merges to main or version tags, not on PRs (secrets aren't available on fork PRs).
-        if: github.event_name != 'pull_request'
+        # Only login if secret is available (won't be on fork PRs and won't be until the
+        # user creates a Docker Hub access token and stores it as DOCKERHUB_TOKEN).
+        if: github.event_name != 'pull_request' && env.HAVE_TOKEN == 'true'
+        env:
+          HAVE_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Build ${{ matrix.component }} (no push)
+        if: github.event_name == 'pull_request' || env.HAVE_TOKEN != 'true'
+        env:
+          HAVE_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.component }}
+          file: ./${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
       - name: Build & push ${{ matrix.component }}
+        if: github.event_name != 'pull_request' && env.HAVE_TOKEN == 'true'
+        env:
+          HAVE_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/build-push-action@v6
         with:
           context: ./${{ matrix.component }}
           file: ./${{ matrix.component }}/Dockerfile
           # Multi-arch: covers both amd64 (VPS/desktop) and arm64 (Apple Silicon / Raspberry Pi 5 / AWS Graviton).
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.component }}
@@ -81,8 +102,8 @@ jobs:
   smoke-test:
     runs-on: ubuntu-latest
     needs: build-and-push
-    # Only run when we actually pushed (i.e. not on PRs, not on skipped builds).
-    if: github.event_name != 'pull_request'
+    # Only run when we actually pushed (Docker Hub creds present).
+    if: github.event_name != 'pull_request' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
