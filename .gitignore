@@ -23,3 +23,5 @@ logs/
 *.bak*
 # Placeholder used by docker-compose when VAULT_PATH isn't set.
 .no-vault/
+# Local-only compose override for developer bind-mounts (real DB path, etc).
+docker-compose.override.yml

@@ -44,6 +44,17 @@ export function authFetch(path: string, init: RequestInit = {}): Promise<Respons
 
 export function apiBase(): string { return API; }
 
+// Thrown by req() on any non-2xx response. Carries the HTTP status so callers can
+// tell "not authorized" (401 — need a token) apart from "not found"/"bad request"/
+// other real errors, instead of lumping every failure into a generic catch.
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, body: string) {
+    super(`${status} ${body}`);
+    this.status = status;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAuthToken();
   const headers = new Headers(init?.headers);
@@ -54,7 +65,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     headers,
     cache: "no-store",
   });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) throw new ApiError(r.status, await r.text());
   return r.json() as Promise<T>;
 }
 
