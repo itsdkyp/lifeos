@@ -1,9 +1,18 @@
-let API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+// API base URL selection:
+//   1. NEXT_PUBLIC_API_URL (dev / build-time override) — explicit absolute origin.
+//   2. Otherwise, use same-origin + /_lifeos-api rewrite path (single-container setup).
+// The rewrite is defined in next.config.ts and forwards to the Hono backend on
+// 127.0.0.1:8787 inside the same container. In dev with two separate processes,
+// set NEXT_PUBLIC_API_URL to the explicit http://127.0.0.1:8787 and the rewrite
+// simply doesn't get exercised.
+const API_PREFIX = "/_lifeos-api";
+const envApiUrl = process.env.NEXT_PUBLIC_API_URL;
+let API = envApiUrl && envApiUrl.length > 0 ? envApiUrl : API_PREFIX;
 
-if (typeof window !== "undefined") {
-  // Automatically point to the same host that is serving the frontend, but on port 8787
-  // This allows the app to work seamlessly from phones or other devices on the local network.
-  API = `${window.location.protocol}//${window.location.hostname}:8787`;
+if (typeof window !== "undefined" && (!envApiUrl || envApiUrl.length === 0)) {
+  // Same-origin: window.location.origin + /_lifeos-api. Works from any host,
+  // any port, over HTTP or HTTPS — no per-device config needed.
+  API = `${window.location.origin}${API_PREFIX}`;
 }
 
 // Bearer token for remote/exposed setups. Priority:
@@ -35,6 +44,17 @@ export function authFetch(path: string, init: RequestInit = {}): Promise<Respons
 
 export function apiBase(): string { return API; }
 
+// Thrown by req() on any non-2xx response. Carries the HTTP status so callers can
+// tell "not authorized" (401 — need a token) apart from "not found"/"bad request"/
+// other real errors, instead of lumping every failure into a generic catch.
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, body: string) {
+    super(`${status} ${body}`);
+    this.status = status;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAuthToken();
   const headers = new Headers(init?.headers);
@@ -45,7 +65,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     headers,
     cache: "no-store",
   });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) throw new ApiError(r.status, await r.text());
   return r.json() as Promise<T>;
 }
 

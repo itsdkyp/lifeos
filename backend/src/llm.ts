@@ -208,6 +208,32 @@ export async function callChat(cfg: LLMConfig, messages: ChatMsg[], onChunk?: (t
   throw new Error(`Unsupported format: ${info.format}`);
 }
 
+// Same math as GET /accounts in index.ts. Kept as a small local helper so the LLM
+// sees the same current balance the UI shows — not just the (often years-old)
+// initial_balance. The transactions list in LLM context is bounded to the last N
+// days, so without this the model would try to reconstruct balances from a
+// partial history and get them wrong.
+function accountsWithBalances() {
+  const accounts = q<any>("SELECT id, name, type, currency, initial_balance FROM accounts");
+  const txns = q<{ account_id: number | null; to_account_id: number | null; amount: number; kind: string }>(
+    "SELECT account_id, to_account_id, amount, kind FROM transactions WHERE account_id IS NOT NULL OR to_account_id IS NOT NULL"
+  );
+  const bal: Record<number, number> = {};
+  for (const t of txns) {
+    if (t.kind === "transfer") {
+      if (t.account_id)     bal[t.account_id]    = (bal[t.account_id]    ?? 0) - t.amount;
+      if (t.to_account_id)  bal[t.to_account_id] = (bal[t.to_account_id] ?? 0) + t.amount;
+    } else if (t.account_id) {
+      bal[t.account_id] = (bal[t.account_id] ?? 0) + (t.kind === "income" ? t.amount : -t.amount);
+    }
+  }
+  return accounts.map(a => {
+    const isLiability = a.type === "credit_card" || a.type === "payable";
+    const startBal = isLiability ? -a.initial_balance : a.initial_balance;
+    return { ...a, current_balance: startBal + (bal[a.id] || 0) };
+  });
+}
+
 // ── high-level API used by /chat and /review ────────────────────────────────
 export async function askLLM(question: string, onChunk?: (t: string) => void): Promise<string> {
   const cfg = getConfig();
@@ -219,10 +245,12 @@ export async function askLLM(question: string, onChunk?: (t: string) => void): P
   // Bounded: no unlimited SELECT * scans. Every list is capped so a heavy user
   // can't blow past the model's context window or explode the prompt cost.
   const LIMIT_TXN = 500, LIMIT_MOOD = 300, LIMIT_TIME = 300, LIMIT_MEAL = 300,
-        LIMIT_JOURNAL = 60, LIMIT_HABIT_LOG = 500, LIMIT_TASKS = 50;
+        LIMIT_JOURNAL = 60, LIMIT_HABIT_LOG = 500, LIMIT_TASKS = 50, LIMIT_HOLDINGS = 200;
   
   const context = {
-    accounts:     q("SELECT id, name, type, currency, initial_balance FROM accounts"),
+    accounts:     accountsWithBalances(),
+    holdings:     q(`SELECT symbol, kind, shares, cost_basis, currency, manual_price, note, imported_from
+                     FROM holdings ORDER BY symbol LIMIT ${LIMIT_HOLDINGS}`),
     habits:       q("SELECT id, name, cadence, target_per_week FROM habits WHERE archived=0"),
     habit_logs:   q(`SELECT h.name, l.day FROM habit_logs l JOIN habits h ON h.id=l.habit_id
                      WHERE l.day>=? ORDER BY l.day DESC LIMIT ${LIMIT_HABIT_LOG}`, since),
@@ -249,7 +277,7 @@ export async function askLLM(question: string, onChunk?: (t: string) => void): P
   let payload = JSON.stringify(context);
   const MAX_CHARS = 90_000;
   if (payload.length > MAX_CHARS) {
-    const heavy = ["transactions", "mood2d", "time", "meals", "habit_logs", "journals"] as const;
+    const heavy = ["transactions", "mood2d", "time", "meals", "habit_logs", "journals", "holdings"] as const;
     let iterations = 0;
     while (payload.length > MAX_CHARS && iterations < 5) {
       for (const key of heavy) {
@@ -264,8 +292,16 @@ export async function askLLM(question: string, onChunk?: (t: string) => void): P
   const messages: ChatMsg[] = [
     { role: "system", content:
       `You are LifeOS, a personal analytics assistant and agentic intent handler. You have context of the user's life spanning ` +
-      `finances, accounts, debts, habits, open tasks, active timers, mood, sleep, and meals for up to the last ${contextDays} days ` +
-      `(older or overflowing records may be truncated). Answer questions helpfully and concisely. Cite concrete dates and numbers. Never fabricate data.\n\n` + profileBlock() },
+      `finances, accounts, debts, investments (holdings), habits, open tasks, active timers, mood, sleep, and meals for up to the last ${contextDays} days ` +
+      `(older or overflowing records may be truncated). Answer questions helpfully and concisely. Cite concrete dates and numbers. Never fabricate data.\n\n` +
+      `IMPORTANT for accounts & money:\n` +
+      `- Each account has a current_balance field — use THAT for "what's my balance?" questions. It already reflects all transactions ever, not just the ${contextDays} days shown.\n` +
+      `- Account types: 'bank' and 'cash' = your money (positive = you have it). 'credit_card' = card debt (positive balance shown = you owe that much). ` +
+      `'receivable' = someone owes YOU money (positive = they owe you). 'payable' = you owe someone else (positive = you owe them).\n` +
+      `- Transactions have kind='expense'|'income'|'transfer'. Transfers move money between accounts (account_id → to_account_id) and do NOT count as spending. IOUs (lending/borrowing) are recorded as transfers between a bank account and a receivable/payable account.\n` +
+      `- Only the last ${contextDays} days of transactions are in context. For older history, quote the current_balance and say "per your current balance" rather than trying to sum a partial list.\n\n` +
+      `IMPORTANT for investments: the holdings list gives you symbol, shares, cost_basis (per unit), and currency — quote invested amounts as shares*cost_basis. ` +
+      `Live market prices are NOT included in this context; if asked for current market value, say the live value is available on the Investments page and give the cost basis figure instead of guessing.\n\n` + profileBlock() },
     { role: "user", content: `DATA:\n${payload}\n\nQUESTION: ${question}` },
   ];
   return callChat(cfg, messages, onChunk);

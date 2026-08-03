@@ -1,49 +1,41 @@
 services:
-  backend:
-    build: ./backend
-    image: lifeos-backend
-    container_name: lifeos-backend
+  lifeos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Optional: bake the token into the browser bundle so every device is authed
+        # without needing to paste it into Settings -> Security. Skip for flexibility.
+        NEXT_PUBLIC_LIFEOS_TOKEN: ${NEXT_PUBLIC_LIFEOS_TOKEN:-}
+    image: lifeos
+    container_name: lifeos
     restart: unless-stopped
-    ports: ["${BACKEND_PORT:-8787}:8787"]
+    ports:
+      # Only ONE port exposed. The backend runs on 127.0.0.1:8787 INSIDE the container
+      # and is unreachable from outside. All browser traffic goes through :3000, which
+      # proxies to the backend via the Next.js rewrite in next.config.ts.
+      - "${LIFEOS_PORT:-3000}:3000"
     environment:
-      PORT: 8787
-      DB_PATH: /data/lifeos.db
-      # LIFEOS_BIND=0.0.0.0 inside the container is fine — the host port mapping is what
-      # actually decides whether the outside world can reach it. Bearer-token auth is
-      # what protects the API when the port IS exposed.
-      LIFEOS_BIND: 0.0.0.0
-      # REQUIRED when you publish port 8787 or use a reverse proxy. Generate:
+      # REQUIRED whenever the port is reachable beyond localhost. Generate:
       #   openssl rand -hex 32
-      # Then set LIFEOS_TOKEN in a .env file next to this compose file.
       LIFEOS_TOKEN: ${LIFEOS_TOKEN:-}
-      # CORS: origins the frontend can use. Add tunnel hostnames here.
+      # Container timezone — controls how the backend buckets "today" via SQL's
+      # date(ts,'localtime'). Set to your local TZ (e.g. Asia/Kolkata, Europe/Berlin,
+      # America/New_York) so day-based aggregates match your wall clock. Defaults
+      # to the host's TZ env when set, else UTC.
+      TZ: ${TZ:-UTC}
+      # CORS: origins the frontend can use. For same-container use, browser and backend
+      # share an origin so this only matters if you serve the frontend from a different
+      # host and expose the backend directly (rare with this compose file).
       LIFEOS_CORS_ORIGIN: ${LIFEOS_CORS_ORIGIN:-http://localhost:3000}
-      # Obsidian vault path INSIDE the container. The volume below maps host -> here.
-      VAULT_PATH: /vault
       JOURNAL_SUBDIR: ${JOURNAL_SUBDIR:-Journal}
+      VAULT_PATH: /vault
     volumes:
       # SQLite DB persists across container recreates.
       - lifeos-data:/data
-      # Obsidian vault — bind-mount so notes stay on the host. Set VAULT_PATH in the .env
-      # file next to this compose. Leave unset (or set to an empty dir) if you don't use Obsidian.
+      # Obsidian vault \u2014 optional. Bind-mount your vault via VAULT_PATH in .env,
+      # otherwise a placeholder empty dir is mounted so the backend has somewhere to write.
       - ${VAULT_PATH:-./.no-vault}:/vault
 
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        # Backend URL as seen from the BROWSER, not the container. If you access LifeOS at
-        # http://YOUR-HOST:3000, this needs to be http://YOUR-HOST:8787 (or wherever the
-        # backend is reachable). For same-host use, http://localhost:8787 is fine.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8787}
-        # Optional: bake the token in at build time so browsers don't have to paste it.
-        # Skip this and paste per-browser in Settings -> Security if you prefer flexibility.
-        NEXT_PUBLIC_LIFEOS_TOKEN: ${NEXT_PUBLIC_LIFEOS_TOKEN:-}
-    image: lifeos-frontend
-    container_name: lifeos-frontend
-    restart: unless-stopped
-    ports: ["${FRONTEND_PORT:-3000}:3000"]
-    depends_on: [backend]
-
 volumes:
-  lifeos-data:      # SQLite database
+  lifeos-data:

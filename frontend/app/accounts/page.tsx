@@ -16,7 +16,7 @@ export default function AccountsPage() {
   const total = data?.grand?.value ?? 0;
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
+    <div className="mx-auto max-w-5xl 2xl:max-w-[1600px] space-y-6">
       <header className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">

@@ -110,7 +110,7 @@ export default function Page() {
   }, [data]);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-4">
+    <div className="mx-auto max-w-7xl 2xl:max-w-[1600px] space-y-4">
       <Header data={data} loading={loading} onRefresh={load} psym={psym} />
 
       {/* Top row: grand summary strip */}

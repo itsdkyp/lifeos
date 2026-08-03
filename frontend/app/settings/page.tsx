@@ -8,12 +8,26 @@ import { LLMSettings } from "@/components/llm-settings";
 import { SecuritySettings } from "@/components/security-settings";
 import { User, Settings, Database, Cpu, HardDrive, Lock } from "lucide-react";
 
+type Tab = "profile" | "preferences" | "obsidian" | "integrations" | "security" | "data";
+const VALID_TABS: Tab[] = ["profile", "preferences", "obsidian", "integrations", "security", "data"];
+
+// Deep-link support: /settings?tab=security lands directly on that tab (used by the
+// "not authorized" banner so a fresh device isn't left guessing which of six tabs
+// holds the token field). Read directly from window.location instead of
+// useSearchParams() so this page stays statically prerenderable (no Suspense needed
+// for what's purely client-side initial state).
+function initialTabFromUrl(): Tab {
+  if (typeof window === "undefined") return "profile";
+  const t = new URLSearchParams(window.location.search).get("tab");
+  return (VALID_TABS as string[]).includes(t ?? "") ? (t as Tab) : "profile";
+}
+
 export default function Page() {
   const { profile, save } = useProfile();
   const [p, setP] = useState<Profile | null>(null);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [err, setErr] = useState("");
-  const [tab, setTab] = useState<"profile" | "preferences" | "obsidian" | "integrations" | "security" | "data">("profile");
+  const [tab, setTab] = useState<Tab>(initialTabFromUrl);
 
   useEffect(() => { if (profile) setP(profile); }, [profile]);
 
@@ -74,7 +88,7 @@ export default function Page() {
   ] as const;
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
+    <div className="mx-auto max-w-5xl 2xl:max-w-[1600px] space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>

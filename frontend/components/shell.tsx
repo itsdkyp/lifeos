@@ -53,7 +53,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 function ShellInner({ children }: { children: React.ReactNode }) {
   const p = usePathname();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const { profile, loading } = useProfile();
+  const { profile, loading, unauthorized } = useProfile();
   const [timerActive, setTimerActive] = useState(false);
 
   useEffect(() => {
@@ -129,6 +129,7 @@ function ShellInner({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="flex-1 min-w-0 p-4 pb-24 md:p-8 md:pb-8 overflow-x-hidden">
+        {unauthorized && p !== "/settings" && <UnauthorizedBanner />}
         {children}
       </main>
 
@@ -159,7 +160,22 @@ function ShellInner({ children }: { children: React.ReactNode }) {
       </button>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-      <OnboardingModal open={!loading && !profile} />
+      {/* Never show the "new user" wizard for an auth failure — a wrong/missing
+          token means "prompt for the token" (the banner below), not "collect a name
+          and DOB again". Otherwise a fresh device/browser gets trapped behind a
+          full-screen modal with no way to reach Settings. */}
+      <OnboardingModal open={!loading && !profile && !unauthorized} />
+    </div>
+  );
+}
+
+function UnauthorizedBanner() {
+  return (
+    <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-700 dark:text-amber-300">
+      <span>This browser isn't authorized on this device yet — paste your access token to unlock everything.</span>
+      <Link href="/settings?tab=security" className="shrink-0 rounded-md bg-amber-500/20 px-3 py-1 font-medium hover:bg-amber-500/30">
+        Go to Settings → Security
+      </Link>
     </div>
   );
 }
