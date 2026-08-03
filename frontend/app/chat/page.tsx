@@ -24,7 +24,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
+    <div className="mx-auto max-w-3xl 2xl:max-w-4xl space-y-4">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Ask LifeOS</h1>
         <p className="text-sm text-muted-foreground">Questions over your last 14 days of data.</p>

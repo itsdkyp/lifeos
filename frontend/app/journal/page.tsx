@@ -72,7 +72,7 @@ export default function Page() {
   };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
+    <div className="mx-auto max-w-6xl 2xl:max-w-[1600px] space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Journal</h1>

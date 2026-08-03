@@ -42,7 +42,7 @@ export function StatsCharts({ stats }: { stats: Stats | null }) {
   ].filter(t => t.show !== false);
 
   return (
-    <div className="flex flex-col h-[350px] md:h-[300px] lg:h-[350px]">
+    <div className="flex flex-col h-[350px] md:h-[300px] lg:h-[350px] 2xl:h-[420px]">
       <div className="flex overflow-x-auto no-scrollbar border-b border-border/50 pb-px mb-4 shrink-0">
         {TABS.map(t => (
           <button 

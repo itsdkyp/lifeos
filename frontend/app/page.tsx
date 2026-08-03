@@ -43,11 +43,11 @@ function DailyQuote() {
   if (!quote) return null;
 
   return (
-    <div className="rounded-2xl border border-border bg-card/40 px-6 py-5 backdrop-blur shadow-sm text-center flex flex-col items-center justify-center animate-in fade-in duration-1000">
-      <p className="text-sm font-medium italic text-muted-foreground/90 max-w-2xl leading-relaxed">
+    <div className="rounded-2xl border border-border bg-card/40 px-6 py-5 2xl:px-8 2xl:py-6 backdrop-blur shadow-sm text-center flex flex-col items-center justify-center animate-in fade-in duration-1000">
+      <p className="text-sm 2xl:text-base font-medium italic text-muted-foreground/90 max-w-2xl 2xl:max-w-3xl leading-relaxed">
         "{quote.quote}"
       </p>
-      <div className="text-[10px] font-bold uppercase tracking-widest mt-3 text-primary/70">
+      <div className="text-[10px] 2xl:text-xs font-bold uppercase tracking-widest mt-3 text-primary/70">
         — {quote.author}, {quote.text}
       </div>
     </div>
@@ -85,100 +85,91 @@ export default function Dashboard() {
   }, [range]);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 md:space-y-8">
+    <div className="mx-auto max-w-7xl 2xl:max-w-[1700px] space-y-6 md:space-y-8 2xl:space-y-10">
       <Header firstName={displayName} alive={alive} age={age} goal={profile?.goal} />
+      <DailyQuote />
       <ActiveSession />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_320px] gap-6 md:gap-8">
-        
-        {/* Main Left Column */}
-        <div className="space-y-6 md:space-y-8 min-w-0">
-          
-          {/* Today */}
-          <section className="space-y-3">
-            <div className="flex items-baseline justify-between">
-              <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Today</h2>
-              <div className="flex items-center gap-2">
-                <ChatWidget onAction={() => {
-                  api.summary(7).then(setToday).catch(() => {});
-                  api.summary(range).then(setRanged).catch(() => {});
-                  api.stats(range).then(setStats).catch(() => {});
-                  api.financeBudget().then(setBudget).catch(() => {});
-                }} />
-                <span className="text-xs text-muted-foreground hidden sm:inline">
-                  or <kbd className="rounded border border-border px-1.5 py-0.5">⌘K</kbd>
-                </span>
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatCard compact icon={Heart} label="Mood"
-                value={today?.mood.today != null ? today.mood.today.toFixed(1) : "—"}
-                sub={today?.mood.today == null ? "not logged" : "logged today"}
-                tone={today?.mood.today == null ? "default" : today.mood.today >= 7 ? "good" : today.mood.today >= 4 ? "default" : "warn"} />
-              <StatCard compact icon={Moon} label="Sleep"
-                value={today?.sleep.last?.hours != null ? `${today.sleep.last.hours}h` : "—"}
-                sub={today?.sleep.last?.day === today?.day ? "logged" : "log tonight"}
-                tone={today?.sleep.last?.hours == null ? "default" :
-                      profile?.sleep_target_hours && today.sleep.last.hours >= profile.sleep_target_hours ? "good" :
-                      today.sleep.last.hours >= 6 ? "default" : "warn"} />
-              <StatCard compact icon={Timer} label="Deep work"
-                value={`${today?.time.today ?? 0}h`}
-                sub="tracked today"
-                tone={(today?.time.today ?? 0) >= 6 ? "good" : (today?.time.today ?? 0) >= 3 ? "default" : "warn"} />
-              <StatCard compact icon={CheckSquare} label="Tasks"
-                value={`${today?.tasks.done_today ?? 0}/${(today?.tasks.done_today ?? 0) + (today?.tasks.open ?? 0)}`}
-                sub={today?.tasks.overdue ? `${today.tasks.overdue} overdue` : "on track"}
-                tone={today?.tasks.overdue ? "bad" : "default"} />
-
-              <StatCard compact icon={Wallet} label="Spent"
-                value={today ? `${sym}${today.spend.today.toFixed(0)}` : "—"}
-                sub={budget ? (budget.safe_to_spend_today < 0 ? "over budget" : "under budget") : "today only"}
-                tone={budget ? (budget.safe_to_spend_today < 0 ? "bad" : "good") : "default"} />
-              <StatCard compact icon={Apple} label="Calories"
-                value={today?.calories?.today ?? 0}
-                sub="today only"
-                tone={(today?.calories?.today ?? 0) > 2500 ? "warn" : "default"} />
-              <StatCard compact icon={Sparkles} label="Wins"
-                value={today?.positive.wins ?? 0}
-                sub="logged today"
-                tone={(today?.positive.wins ?? 0) > 0 ? "good" : "default"} />
-              <StatCard compact icon={Heart} label="Gratitude"
-                value={today?.positive.gratitude ?? 0}
-                sub="logged today"
-                tone={(today?.positive.gratitude ?? 0) > 0 ? "good" : "default"} />
-            </div>
-
-            <NudgeCard s={today} />
-          </section>
-
-          {/* Trend — range-driven */}
-          <section className="space-y-4">
-            <div className="flex flex-wrap items-baseline justify-between gap-3">
-              <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Trend</h2>
-              <RangeToggle range={range} setRange={setRange} />
-            </div>
-
-            <Card className="p-0 overflow-hidden">
-              <StatsCharts stats={stats} />
-            </Card>
-          </section>
+      {/* Today */}
+      <section className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Today</h2>
+          <div className="flex items-center gap-2">
+            <ChatWidget onAction={() => {
+              api.summary(7).then(setToday).catch(() => {});
+              api.summary(range).then(setRanged).catch(() => {});
+              api.stats(range).then(setStats).catch(() => {});
+              api.financeBudget().then(setBudget).catch(() => {});
+            }} />
+            <span className="text-xs text-muted-foreground hidden sm:inline">
+              or <kbd className="rounded border border-border px-1.5 py-0.5">⌘K</kbd>
+            </span>
+          </div>
         </div>
 
-        {/* Right Sidebar Column */}
-        <div className="space-y-6 min-w-0">
-          <DailyQuote />
+        <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3 2xl:gap-4">
+          <StatCard compact icon={Heart} label="Mood"
+            value={today?.mood.today != null ? today.mood.today.toFixed(1) : "—"}
+            sub={today?.mood.today == null ? "not logged" : "logged today"}
+            tone={today?.mood.today == null ? "default" : today.mood.today >= 7 ? "good" : today.mood.today >= 4 ? "default" : "warn"} />
+          <StatCard compact icon={Moon} label="Sleep"
+            value={today?.sleep.last?.hours != null ? `${today.sleep.last.hours}h` : "—"}
+            sub={today?.sleep.last?.day === today?.day ? "logged" : "log tonight"}
+            tone={today?.sleep.last?.hours == null ? "default" :
+                  profile?.sleep_target_hours && today.sleep.last.hours >= profile.sleep_target_hours ? "good" :
+                  today.sleep.last.hours >= 6 ? "default" : "warn"} />
+          <StatCard compact icon={Timer} label="Deep work"
+            value={`${today?.time.today ?? 0}h`}
+            sub="tracked today"
+            tone={(today?.time.today ?? 0) >= 6 ? "good" : (today?.time.today ?? 0) >= 3 ? "default" : "warn"} />
+          <StatCard compact icon={CheckSquare} label="Tasks"
+            value={`${today?.tasks.done_today ?? 0}/${(today?.tasks.done_today ?? 0) + (today?.tasks.open ?? 0)}`}
+            sub={today?.tasks.overdue ? `${today.tasks.overdue} overdue` : "on track"}
+            tone={today?.tasks.overdue ? "bad" : "default"} />
 
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Shortcuts</h2>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-              <ShortcutCard href="/journal" title="Reflect" body="Journal, wins, gratitude — the mind-clearing routine." />
-              <ShortcutCard href="/tasks" title="Tasks" body="Plan what to do next in your Eisenhower matrix." />
-              <ShortcutCard href="/time?mode=pomodoro" title="Deep Work" body="Start a Pomodoro or stopwatch timer." />
-            </div>
-          </section>
+          <StatCard compact icon={Wallet} label="Spent"
+            value={today ? `${sym}${today.spend.today.toFixed(0)}` : "—"}
+            sub={budget ? (budget.safe_to_spend_today < 0 ? "over budget" : "under budget") : "today only"}
+            tone={budget ? (budget.safe_to_spend_today < 0 ? "bad" : "good") : "default"} />
+          <StatCard compact icon={Apple} label="Calories"
+            value={today?.calories?.today ?? 0}
+            sub="today only"
+            tone={(today?.calories?.today ?? 0) > 2500 ? "warn" : "default"} />
+          <StatCard compact icon={Sparkles} label="Wins"
+            value={today?.positive.wins ?? 0}
+            sub="logged today"
+            tone={(today?.positive.wins ?? 0) > 0 ? "good" : "default"} />
+          <StatCard compact icon={Heart} label="Gratitude"
+            value={today?.positive.gratitude ?? 0}
+            sub="logged today"
+            tone={(today?.positive.gratitude ?? 0) > 0 ? "good" : "default"} />
         </div>
-      </div>
+
+        <NudgeCard s={today} />
+      </section>
+
+      {/* Trend — range-driven */}
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Trend</h2>
+          <RangeToggle range={range} setRange={setRange} />
+        </div>
+
+        <Card className="p-0 overflow-hidden">
+          <StatsCharts stats={stats} />
+        </Card>
+      </section>
+
+      {/* Shortcuts — below Trend, full-width row so it scales with the page instead
+          of being squeezed into a fixed-width sidebar. */}
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">Shortcuts</h2>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <ShortcutCard href="/journal" title="Reflect" body="Journal, wins, gratitude — the mind-clearing routine." />
+          <ShortcutCard href="/tasks" title="Tasks" body="Plan what to do next in your Eisenhower matrix." />
+          <ShortcutCard href="/time?mode=pomodoro" title="Deep Work" body="Start a Pomodoro or stopwatch timer." />
+        </div>
+      </section>
     </div>
   );
 }
@@ -209,10 +200,10 @@ function Header({ firstName, alive, age, goal }: { firstName: string; alive: num
   return (
     <header className="space-y-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+        <h1 className="text-2xl md:text-3xl 2xl:text-4xl font-semibold tracking-tight">
           {greet}{firstName && `, ${firstName}`}.
         </h1>
-        <div suppressHydrationWarning className="text-lg font-medium tabular-nums text-muted-foreground min-h-[1.75rem]">
+        <div suppressHydrationWarning className="text-lg 2xl:text-xl font-medium tabular-nums text-muted-foreground min-h-[1.75rem]">
           {mounted ? timeStr : ""}
         </div>
       </div>
