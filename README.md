@@ -140,6 +140,8 @@ cp .env.example .env && vi .env      # set LIFEOS_TOKEN and TZ
 docker compose up -d
 ```
 
+You can pin a specific release instead of `latest` by using a tag: `image: itsdkyp/lifeos:0.1.0`.
+
 Multi-arch image — same tag works on `linux/amd64` (VPS/desktop) and `linux/arm64` (Apple
 Silicon / Raspberry Pi 5 / AWS Graviton).
 
@@ -213,6 +215,29 @@ on backend start.
 
 ---
 
+## What the LLM chat can answer
+
+The LLM does not run arbitrary SQL. Instead, on every chat message, the backend runs a fixed
+set of queries and packages them into a ~50KB JSON payload sent to the LLM. 
+
+**What is included:**
+- **Accounts:** All accounts, including `current_balance` (which reflects *all* transaction history, not just recent ones).
+- **Holdings:** Your current investments (symbol, shares, cost basis). Note: live market prices are NOT sent; the LLM quotes cost-basis amounts.
+- **Rolling context:** The last `N` days of transactions, mood, sleep, meals, time tracking, habit logs, and journal entries.
+- **State:** Open tasks, your active timer, and your profile configuration.
+
+**What is NOT included:**
+- Transaction details older than the context window.
+- Live market prices for stocks/mutual funds.
+
+**Tuning the context window:**
+In **Settings → LLM**, adjust the `context_days` slider. 
+- Default (30 days) uses ~10k input tokens per turn (fraction of a cent on Gemini Flash).
+- You can safely bump this to 180 days (uses ~25k tokens) — still incredibly cheap, well under any modern model's context limit, and answers historical questions much better.
+- A hard payload cap (`MAX_CHARS = 90k`) ensures you can never accidentally send a multi-megabyte payload and blow out your API bill; older data is gracefully truncated if you hit the ceiling.
+
+---
+
 ## Switching LLM providers
 
 Edit `llm-proxy/config.yaml` — add/remove `model_list` entries. Then in `backend/.env`:
@@ -266,14 +291,21 @@ big warning telling you exactly why.
 
 ### Step 3 — register the token in the browser
 
-1. Open http://localhost:3000/settings on your Mac.
-2. Click the **Security** tab.
-3. Paste the same 64-char token, click **Save token in this browser**.
-4. The green **Authenticated** badge should appear — that's your confirmation the backend and
-   browser agree.
+Because the backend blocks unauthenticated requests, opening LifeOS on a fresh device
+will show an amber "Not authorized" banner.
 
-Repeat step 3 on every device (phone, tablet, laptop) that connects. The token is stored in
-`localStorage` per browser — there is nothing else to sync.
+1. Click the link in the banner to go to **Settings → Security**.
+2. Paste your `LIFEOS_TOKEN` and click save.
+3. The green **Authenticated** badge should appear — that's your confirmation.
+4. The browser stores it in `localStorage` and uses it for all future requests.
+
+*Alternative (zero-paste):* If you don't want to paste the token on every device, you can
+bake it directly into the frontend. Set `NEXT_PUBLIC_LIFEOS_TOKEN` in your `.env` to the
+same value as `LIFEOS_TOKEN` and run `docker compose build`.
+**Trade-off:** The token becomes extractable from the downloaded JavaScript bundle. Anyone
+who can reach the URL can read the token. For a home-LAN / Tailscale setup, this is fine
+(they're already on your trusted network). Do not do this if your LifeOS port is exposed
+to the public internet.
 
 ### Step 4 — pick a remote-access path
 
