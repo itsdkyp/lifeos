@@ -143,6 +143,16 @@ CREATE TABLE IF NOT EXISTS holdings (
 CREATE INDEX IF NOT EXISTS idx_hold_symbol ON holdings(symbol);
 CREATE INDEX IF NOT EXISTS idx_hold_imported_from ON holdings(imported_from);
 
+-- Idempotency ledger for trade-delta imports (Groww Order History, etc). Each row
+-- is one broker order ID we've already applied to holdings. Re-importing the same
+-- file (or an overlapping-date re-export) checks this before touching a position,
+-- so uploading a file twice can never double-count shares.
+CREATE TABLE IF NOT EXISTS imported_order_ids (
+  order_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS profile (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL,
