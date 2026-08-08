@@ -218,6 +218,37 @@ if (!profileCols.includes("google_client_id")) db.exec("ALTER TABLE profile ADD 
 if (!profileCols.includes("google_client_secret")) db.exec("ALTER TABLE profile ADD COLUMN google_client_secret TEXT");
 if (!profileCols.includes("monthly_budget")) db.exec("ALTER TABLE profile ADD COLUMN monthly_budget REAL");
 if (!profileCols.includes("fixed_categories")) db.exec("ALTER TABLE profile ADD COLUMN fixed_categories TEXT DEFAULT '[]'");
+if (!profileCols.includes("username"))      db.exec("ALTER TABLE profile ADD COLUMN username TEXT");
+if (!profileCols.includes("password_hash")) db.exec("ALTER TABLE profile ADD COLUMN password_hash TEXT");
+
+// Password-login sessions. No expiry column by design — a session is valid until its
+// row is deleted by an explicit /auth/logout. token_hash (not the raw cookie value) is
+// stored so a leaked DB backup can't be replayed as a live session.
+db.exec(`
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+-- User-generated tokens for MCP/API/script access (replaces the old static LIFEOS_TOKEN
+-- env var). Same token_hash-not-raw-value principle as sessions. The raw token is shown
+-- to the user exactly once, at creation time, in the API response — never again.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+
+-- Login attempt log, for brute-force rate limiting on /auth/login.
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempted_at TEXT NOT NULL,
+  success INTEGER NOT NULL
+);
+`);
 
 // Convenience wrappers
 export const q  = <T = any>(sql: string, ...args: any[]) => db.query(sql).all(...args) as T[];

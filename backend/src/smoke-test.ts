@@ -4,8 +4,15 @@
 
 const API = "http://127.0.0.1:8787";
 const TAG = `smoketest_${Date.now()}`;
-const TOKEN = process.env.LIFEOS_TOKEN;
-console.log(`\n🔬 LifeOS smoke test — tag: ${TAG}${TOKEN ? " (auth enabled)" : ""}\n`);
+// Auth model: session cookie (password login) or a user-generated API token — no more
+// static LIFEOS_TOKEN env var. Two ways to run this script:
+//   1. Against an already-configured instance: LIFEOS_API_TOKEN=<token from Settings
+//      -> Security -> API Tokens> bun run smoke
+//   2. Against a fresh/unconfigured instance (e.g. CI spinning up a new container):
+//      no env needed — bootstrapAuth() below self-registers a throwaway account.
+const PRESET_TOKEN = process.env.LIFEOS_API_TOKEN;
+let sessionCookie: string | null = null;
+console.log(`\n🔬 LifeOS smoke test — tag: ${TAG}\n`);
 
 type Result = { name: string; pass: boolean; detail?: string };
 const results: Result[] = [];
@@ -13,11 +20,111 @@ const results: Result[] = [];
 async function req(path: string, opts: RequestInit = {}): Promise<{ status: number; body: any }> {
   const headers = new Headers(opts.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  if (TOKEN) headers.set("Authorization", `Bearer ${TOKEN}`);
+  if (PRESET_TOKEN) headers.set("Authorization", `Bearer ${PRESET_TOKEN}`);
+  else if (sessionCookie) headers.set("Cookie", sessionCookie);
   const r = await fetch(API + path, { ...opts, headers });
   let body: any;
   try { body = await r.json(); } catch { body = await r.text(); }
   return { status: r.status, body };
+}
+
+// Set when bootstrapAuth self-registers a throwaway account (fresh/unconfigured instance
+// only) — lets the dedicated auth-mechanics checks below actually exercise login with
+// known-good/known-bad credentials. Stays null in PRESET_TOKEN mode, where we
+// deliberately never know the real password of an already-configured instance.
+let bootstrapCreds: { username: string; password: string } | null = null;
+
+async function bootstrapAuth(): Promise<void> {
+  if (PRESET_TOKEN) { console.log("auth: using LIFEOS_API_TOKEN from env\n"); return; }
+  const status = await fetch(API + "/session/status").then(r => r.json()) as { configured: boolean; authenticated: boolean };
+  if (!status.configured) {
+    const username = `smoketest_${Date.now()}`;
+    const password = crypto.randomUUID();
+    const r = await fetch(API + "/session/setup", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!r.ok) throw new Error(`bootstrap /session/setup failed: ${r.status} ${await r.text()}`);
+    const setCookie = r.headers.get("set-cookie");
+    sessionCookie = setCookie ? setCookie.split(";")[0]! : null;
+    if (!sessionCookie) throw new Error("bootstrap: no session cookie returned from /session/setup");
+    bootstrapCreds = { username, password };
+    console.log(`auth: fresh/unconfigured instance — self-registered a throwaway test account (${username}). This is expected on CI; on your own dev instance it means that instance is now "configured" with these throwaway credentials.\n`);
+  } else {
+    throw new Error(
+      "Backend already has an account configured, but no LIFEOS_API_TOKEN was provided.\n" +
+      "   Generate one: Settings -> Security -> API Tokens -> Generate new token, then:\n" +
+      "   LIFEOS_API_TOKEN=<token> bun run smoke"
+    );
+  }
+}
+
+// Dedicated coverage for the auth mechanics themselves (not just "is every other
+// endpoint reachable with valid creds", which the rest of the suite already implies).
+// Only runs in self-bootstrapped mode, where the test knows real, valid credentials to
+// exercise a real login — skipped in PRESET_TOKEN mode against an already-configured
+// instance (correctly: we never know that instance's actual password).
+async function checkAuthMechanics(): Promise<void> {
+  if (!bootstrapCreds) {
+    console.log("⏭  Skipping 6 auth-mechanics tests — running with a preset LIFEOS_API_TOKEN, not a fresh self-registered account\n");
+    return;
+  }
+  const { username, password } = bootstrapCreds;
+
+  // 1. Protected endpoint with no credentials at all -> 401
+  {
+    const r = await fetch(API + "/accounts");
+    check("Protected endpoint 401s with no credentials", r.status === 401);
+  }
+
+  // 2. Wrong password -> 401, and does NOT set a session cookie
+  {
+    const r = await fetch(API + "/session/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password: "definitely-wrong" }),
+    });
+    check("Login with wrong password returns 401", r.status === 401);
+  }
+
+  // 3. Correct password -> 200, new session cookie works on a protected endpoint
+  {
+    const r = await fetch(API + "/session/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const cookie = r.headers.get("set-cookie")?.split(";")[0] ?? null;
+    check("Login with correct password returns 200 + session cookie", r.status === 200 && !!cookie);
+    if (cookie) {
+      const protectedR = await fetch(API + "/accounts", { headers: { Cookie: cookie } });
+      check("Fresh session cookie authenticates a protected endpoint", protectedR.status === 200);
+    }
+  }
+
+  // 4. API token: create (session-only), then use as Bearer on a protected endpoint
+  let apiToken: string | null = null;
+  let tokenId: number | null = null;
+  {
+    const r = await req("/api-tokens", { method: "POST", body: JSON.stringify({ name: TAG }) });
+    apiToken = r.body?.token ?? null;
+    check("POST /api-tokens returns a raw token (session auth)", r.status === 200 && typeof apiToken === "string" && apiToken.length >= 32);
+    const list = await req("/api-tokens");
+    tokenId = (list.body as any[])?.find(t => t.name === TAG)?.id ?? null;
+  }
+  if (apiToken) {
+    const r = await fetch(API + "/accounts", { headers: { Authorization: `Bearer ${apiToken}` } });
+    check("Newly-created API token authenticates a protected endpoint", r.status === 200);
+
+    // 5. A leaked API token must NOT be able to mint or list more API tokens (session-only guard)
+    const escalate = await fetch(API + "/api-tokens", { headers: { Authorization: `Bearer ${apiToken}` } });
+    check("API token cannot access /api-tokens (session-only, prevents privilege escalation)", escalate.status === 403);
+  }
+
+  // 6. Revoke the token -> it stops working immediately
+  if (tokenId != null) {
+    await req(`/api-tokens/${tokenId}`, { method: "DELETE" });
+    const r = await fetch(API + "/accounts", { headers: { Authorization: `Bearer ${apiToken}` } });
+    check("Revoked API token no longer authenticates", r.status === 401);
+  }
 }
 
 function check(name: string, pass: boolean, detail?: string) {
@@ -28,6 +135,9 @@ function check(name: string, pass: boolean, detail?: string) {
 }
 
 async function run() {
+  await bootstrapAuth();
+  await checkAuthMechanics();
+
   // LifeOS convention: use LOCAL date everywhere (matches the backend's date(ts,'localtime')).
   const todayD = (() => {
     const d = new Date();

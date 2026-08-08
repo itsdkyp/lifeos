@@ -5,13 +5,17 @@ import { z } from "zod";
 import { q, q1, run, db } from "./db.ts";
 import { syncDay } from "./obsidian.ts";
 import { askLLM, callChat, getConfig, PROVIDERS, type Provider } from "./llm.ts";
-import { importBrokerFile, type NormHolding } from "./importers.ts";
+import { importBrokerFile, type NormHolding, type NormTrade } from "./importers.ts";
 import {
   copilotStartDevice, copilotPollDevice, copilotGetAuth,
   anthropicStart, anthropicPoll, anthropicFinishManual,
   googleGetAccessToken, googleExchangeCode, createGoogleTask, markGoogleTaskDone, updateGoogleTask,
   saveToken, getToken, clearToken,
 } from "./oauth.ts";
+import {
+  hashPassword, verifyPassword, createSession, destroySession, authenticate,
+  createApiToken, isLoginRateLimited, recordLoginAttempt,
+} from "./auth.ts";
 
 const app = new Hono();
 
@@ -25,26 +29,22 @@ app.use("*", cors({ origin: (origin) => {
   return null;
 }}));
 
-// ── Bearer-token auth ──────────────────────────────────────────
-// Enabled when LIFEOS_TOKEN is set. Applied to every route EXCEPT /health.
-// Also accepts token via ?token=... query for cases like /dev/export downloads.
-const LIFEOS_TOKEN = process.env.LIFEOS_TOKEN;
-if (LIFEOS_TOKEN && LIFEOS_TOKEN.length < 16) {
-  console.error("❌ LIFEOS_TOKEN is too short (<16 chars). Refusing to start. Generate one with: openssl rand -hex 32");
-  process.exit(1);
-}
+// ── Auth: session cookie (password login) OR API token (MCP/scripts) ────────────
+// Open routes: health check, and the auth flow itself (status/setup/login must be
+// reachable by a not-yet-authenticated browser, or there's no way to ever log in).
+const OPEN_PATHS = new Set(["/health", "/session/status", "/session/setup", "/session/login"]);
+// Endpoints that manage credentials require a SESSION specifically — a leaked API
+// token must never be usable to mint/enumerate more tokens or change the password
+// (privilege escalation).
+const isSessionOnlyPath = (path: string) => path.startsWith("/api-tokens") || path === "/session/change-password";
 app.use("*", async (c, next) => {
-  if (!LIFEOS_TOKEN) return next(); // auth disabled
-  if (c.req.path === "/health") return next(); // liveness probe stays open
+  if (OPEN_PATHS.has(c.req.path)) return next();
   if (c.req.method === "OPTIONS") return next(); // CORS preflight
 
-  const auth = c.req.header("Authorization") ?? "";
-  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  const qtoken = c.req.query("token") ?? null;
-  const provided = bearer ?? qtoken;
-
-  if (!provided || provided !== LIFEOS_TOKEN) {
-    return c.json({ error: "Unauthorized. Set Authorization: Bearer <token>." }, 401);
+  const method = await authenticate(c);
+  if (!method) return c.json({ error: "Unauthorized. Log in, or set Authorization: Bearer <api-token>." }, 401);
+  if (isSessionOnlyPath(c.req.path) && method !== "session") {
+    return c.json({ error: "This endpoint requires a logged-in session, not an API token." }, 403);
   }
   return next();
 });
@@ -66,11 +66,100 @@ const now   = () => new Date().toISOString();
 // ── health ────────────────────────────────────────────────────────────────
 app.get("/health", (c) => c.json({ ok: true, ts: now() }));
 
+// ── auth: password login (primary) + API tokens (MCP/scripts) ─────────────────
+app.get("/session/status", async (c) => {
+  const p = q1<{ username: string | null }>("SELECT username FROM profile WHERE id=1");
+  const configured = !!p?.username;
+  const authenticated = configured ? (await authenticate(c)) !== null : false;
+  return c.json({ configured, authenticated });
+});
+
+app.post("/session/setup",
+  zValidator("json", z.object({
+    username: z.string().trim().min(3).max(50),
+    password: z.string().min(8).max(200),
+  })),
+  async (c) => {
+    const { username, password } = c.req.valid("json");
+    const existing = q1<any>("SELECT * FROM profile WHERE id=1");
+    if (existing?.username) return c.json({ error: "Already configured. Use /session/login." }, 403);
+
+    const hash = await hashPassword(password);
+    const nowIso = now();
+    if (existing) {
+      run("UPDATE profile SET username=?, password_hash=?, updated_at=? WHERE id=1", username, hash, nowIso);
+    } else {
+      // Fresh install, no profile row yet at all — create a minimal one so auth can be
+      // set up independently of the "who are you" onboarding modal (name/DOB/etc).
+      // name defaults to the username; the user can change it in Settings any time —
+      // the existing OnboardingModal will still prompt for the rest since most profile
+      // fields remain unset.
+      run(`INSERT INTO profile(id,name,username,password_hash,currency,sleep_target_hours,fixed_categories,created_at,updated_at)
+           VALUES(1,?,?,?,?,?,?,?,?)`,
+        username, username, hash, "USD", 8, "[]", nowIso, nowIso);
+    }
+    await createSession(c);
+    return c.json({ ok: true });
+  });
+
+app.post("/session/login",
+  zValidator("json", z.object({ username: z.string(), password: z.string() })),
+  async (c) => {
+    if (isLoginRateLimited()) {
+      return c.json({ error: "Too many failed attempts. Try again in a few minutes." }, 429);
+    }
+    const { username, password } = c.req.valid("json");
+    const p = q1<any>("SELECT username, password_hash FROM profile WHERE id=1");
+    const ok = !!p?.password_hash && p.username === username && await verifyPassword(password, p.password_hash);
+    recordLoginAttempt(ok);
+    if (!ok) return c.json({ error: "Invalid username or password." }, 401);
+    await createSession(c);
+    return c.json({ ok: true });
+  });
+
+app.post("/session/logout", async (c) => {
+  await destroySession(c);
+  return c.json({ ok: true });
+});
+
+app.post("/session/change-password",
+  zValidator("json", z.object({ current_password: z.string(), new_password: z.string().min(8).max(200) })),
+  async (c) => {
+    const { current_password, new_password } = c.req.valid("json");
+    const p = q1<any>("SELECT password_hash FROM profile WHERE id=1");
+    if (!p?.password_hash || !(await verifyPassword(current_password, p.password_hash))) {
+      return c.json({ error: "Current password is incorrect." }, 401);
+    }
+    const hash = await hashPassword(new_password);
+    run("UPDATE profile SET password_hash=?, updated_at=? WHERE id=1", hash, now());
+    return c.json({ ok: true });
+  });
+
+// ── API tokens (session-only — enforced in the global auth middleware above) ──────
+app.get("/api-tokens", (c) => {
+  const rows = q<any>("SELECT id, name, created_at, last_used_at FROM api_tokens ORDER BY created_at DESC");
+  return c.json(rows);
+});
+
+app.post("/api-tokens",
+  zValidator("json", z.object({ name: z.string().trim().min(1).max(100) })),
+  async (c) => {
+    const { name } = c.req.valid("json");
+    const token = await createApiToken(name);
+    return c.json({ token, name }); // raw token shown ONCE — never retrievable again after this response
+  });
+
+app.delete("/api-tokens/:id", (c) => {
+  const id = Number(c.req.param("id"));
+  run("DELETE FROM api_tokens WHERE id=?", id);
+  return c.json({ ok: true });
+});
+
 // ── profile ───────────────────────────────────────────────────────────────────────────
 app.get("/profile", (c) => {
   const p = q1<any>("SELECT * FROM profile WHERE id=1");
   if (!p) return c.json(null);
-  const { values_json, google_client_secret, ...rest } = p;
+  const { values_json, google_client_secret, password_hash, ...rest } = p;
   // Mask the OAuth client secret: expose only whether it's set and the last 4 chars.
   const gcs_mask = google_client_secret ? `••••${String(google_client_secret).slice(-4)}` : null;
   return c.json({
@@ -2302,7 +2391,7 @@ app.post("/holdings/sync-gmail", async (c) => {
         const amount = parseFloat(mfMatch[2]!.replace(/,/g, ""));
         if (symbol && !isNaN(cost_basis) && !isNaN(amount) && cost_basis > 0) {
           const shares = amount / cost_basis;
-          applyTrade(symbol, "mf", shares, cost_basis, "INR", "Gmail Import: Groww MF");
+          applyTrade(symbol, "mf", shares, cost_basis, "INR", "Gmail Import: Groww MF", "BUY", "groww_mf");
           imported++;
           matched = true;
         }
@@ -2320,7 +2409,7 @@ app.post("/holdings/sync-gmail", async (c) => {
           const currency = (text.includes("$") || text.includes("USD") || !text.includes("₹")) && !text.toLowerCase().includes("rs") ? "USD" : "INR";
           if (symbol && !isNaN(shares) && !isNaN(cost_basis)) {
             const kind = /ETF|BEES/i.test(symbol) ? "etf" : "stock";
-            applyTrade(symbol, kind, shares, cost_basis, currency, "Gmail Import: Stock");
+            applyTrade(symbol, kind, shares, cost_basis, currency, "Gmail Import: Stock", "BUY", "groww_stocks");
             imported++;
             matched = true;
           }
@@ -2334,19 +2423,31 @@ app.post("/holdings/sync-gmail", async (c) => {
   }
 });
 
-function applyTrade(symbol: string, kind: string, shares: number, cost_basis: number, currency: string, note: string) {
+// side="BUY" (default): weighted-average the new shares into any existing position
+// (same symbol, case-insensitive). side="SELL": decrement shares only — selling does
+// NOT change the cost basis of the shares you still hold, so `cost_basis` in that case
+// is informational only (used for the note) and never touches the stored average cost.
+// Position fully closed (shares -> ~0) deletes the row rather than leaving a zero-share ghost.
+function applyTrade(symbol: string, kind: string, shares: number, cost_basis: number, currency: string, note: string, side: "BUY" | "SELL" = "BUY", importedFrom: string | null = null) {
   const existing = q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE symbol=?", symbol.toUpperCase());
+  if (side === "SELL") {
+    if (!existing) return; // selling something we have no record of — nothing to decrement, ignore.
+    const newShares = existing.shares - shares;
+    if (newShares <= 0.0001) run("DELETE FROM holdings WHERE id=?", existing.id);
+    else run("UPDATE holdings SET shares=? WHERE id=?", newShares, existing.id);
+    return;
+  }
   if (existing) {
     const newShares = existing.shares + shares;
     const newCost = ((existing.shares * existing.cost_basis) + (shares * cost_basis)) / newShares;
     run("UPDATE holdings SET shares=?, cost_basis=? WHERE id=?", newShares, newCost, existing.id);
   } else {
-    run("INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,created_at) VALUES(?,?,?,?,?,?,?)",
-        symbol.toUpperCase(), kind, shares, cost_basis, currency, note, now());
+    run("INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,imported_from,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        symbol.toUpperCase(), kind, shares, cost_basis, currency, note, importedFrom, now());
   }
 }
 
-// Broker report import (Groww Stocks / MF for now)
+// Broker report import (Groww Stocks / MF / Order History, Ind Money for now)
 app.post("/holdings/import", async (c) => {
   const form = await c.req.formData();
   const file = form.get("file") as File | null;
@@ -2356,6 +2457,31 @@ app.post("/holdings/import", async (c) => {
   let result;
   try { result = importBrokerFile(buf, file.name); }
   catch (e: any) { return c.json({ error: String(e?.message ?? e) }, 400); }
+
+  // Order-history files are a per-trade DELTA log for a bounded date range, not a full
+  // point-in-time snapshot — apply each trade as an incremental adjustment (merge into
+  // whatever the position already is) via the same weighted-average logic the Gmail sync
+  // uses. Never honor `replace` here: wiping existing holdings based on a partial window
+  // would delete legitimate shares bought/sold outside the exported date range.
+  if ("trades" in result) {
+    let applied = 0, alreadyApplied = 0;
+    for (const t of result.trades as NormTrade[]) {
+      // Dedup against re-imports: if this exact broker order was already applied
+      // (same file re-uploaded, or a fresh export overlapping an earlier one), skip
+      // it rather than double-counting the shares.
+      if (t.orderId && q1("SELECT 1 FROM imported_order_ids WHERE order_id=?", t.orderId)) {
+        alreadyApplied++;
+        continue;
+      }
+      applyTrade(t.symbol, t.kind, t.qty, t.price, t.currency, t.note ?? "", t.side, result.source);
+      if (t.orderId) run("INSERT OR IGNORE INTO imported_order_ids(order_id,source,applied_at) VALUES(?,?,?)", t.orderId, result.source, now());
+      applied++;
+    }
+    return c.json({
+      source: result.source, imported: applied,
+      skipped: result.skipped + alreadyApplied, already_applied: alreadyApplied, consolidated: 0,
+    });
+  }
 
   if (replace) run("DELETE FROM holdings WHERE imported_from = ?", result.source);
 
@@ -2666,12 +2792,15 @@ const port = Number(process.env.PORT ?? 8787);
 // Bind to loopback only. Set LIFEOS_BIND=0.0.0.0 in .env to expose on the LAN/tailnet.
 const hostname = process.env.LIFEOS_BIND ?? "127.0.0.1";
 console.log(`⚡ LifeOS backend on http://${hostname}:${port}`);
-if (hostname !== "127.0.0.1" && !LIFEOS_TOKEN) {
-  console.warn(`
-⚠️  WARNING: LifeOS is bound to ${hostname} but LIFEOS_TOKEN is NOT set.
+if (hostname !== "127.0.0.1") {
+  const p = q1<{ username: string | null }>("SELECT username FROM profile WHERE id=1");
+  if (!p?.username) {
+    console.warn(`
+⚠️  WARNING: LifeOS is bound to ${hostname} but no login is configured yet.
     Anything that can reach this port can read your journal, spend your LLM quota,
-    and delete your data. Set LIFEOS_TOKEN in backend/.env before exposing.
-    Generate one with:  openssl rand -hex 32
+    and delete your data. Open the app and complete the "Create your account"
+    step before exposing this beyond localhost.
 `);
+  }
 }
 export default { port, hostname, fetch: app.fetch };

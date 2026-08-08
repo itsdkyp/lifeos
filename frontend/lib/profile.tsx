@@ -1,34 +1,26 @@
 "use client";
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { api, ApiError, type Profile } from "@/lib/api";
+import { api, type Profile } from "@/lib/api";
 
+// ProfileProvider only ever mounts INSIDE AuthGate (see shell.tsx), so a fetch failure
+// here is a real error (no profile row, or a genuine backend problem) — never an auth
+// failure. AuthGate/AuthProvider owns the "not logged in" case entirely upstream.
 type Ctx = {
   profile: Profile | null;
   loading: boolean;
-  // True when the last profile fetch failed with 401 — i.e. this is a fresh
-  // browser/device that hasn't registered the LIFEOS_TOKEN yet, NOT a brand-new
-  // user with no profile row. Distinguishing the two matters: the onboarding
-  // modal should never show for "wrong/missing token", only for "no profile yet".
-  unauthorized: boolean;
   refresh: () => Promise<void>;
   save: (p: Profile) => Promise<void>;
 };
-const ProfileCtx = createContext<Ctx>({ profile: null, loading: true, unauthorized: false, refresh: async () => {}, save: async () => {} });
+const ProfileCtx = createContext<Ctx>({ profile: null, loading: true, refresh: async () => {}, save: async () => {} });
 
 export function ProfileProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [unauthorized, setUnauthorized] = useState(false);
 
   const refresh = useCallback(async () => {
-    try {
-      const p = await api.profileGet();
-      setProfile(p);
-      setUnauthorized(false);
-    } catch (e) {
-      setProfile(null);
-      setUnauthorized(e instanceof ApiError && e.status === 401);
-    } finally { setLoading(false); }
+    try { const p = await api.profileGet(); setProfile(p); }
+    catch { setProfile(null); }
+    finally { setLoading(false); }
   }, []);
 
   const save = useCallback(async (p: Profile) => {
@@ -38,7 +30,7 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  return <ProfileCtx.Provider value={{ profile, loading, unauthorized, refresh, save }}>{children}</ProfileCtx.Provider>;
+  return <ProfileCtx.Provider value={{ profile, loading, refresh, save }}>{children}</ProfileCtx.Provider>;
 }
 
 export const useProfile = () => useContext(ProfileCtx);

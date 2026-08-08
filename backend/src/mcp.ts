@@ -16,7 +16,11 @@ const server = new Server(
 );
 
 const API = process.env.LIFEOS_API_URL || "http://127.0.0.1:8787";
-const TOKEN = process.env.LIFEOS_TOKEN;
+// Generate this in the LifeOS UI: Settings -> Security -> API Tokens -> Generate new
+// token. Replaces the old shared LIFEOS_TOKEN env var, which no longer exists as a
+// concept — auth is now username/password (browser) or a user-generated API token
+// (this, for MCP/scripts).
+const TOKEN = process.env.LIFEOS_API_TOKEN;
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return TOKEN ? { Authorization: `Bearer ${TOKEN}`, ...extra } : extra;

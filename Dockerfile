@@ -26,10 +26,6 @@ COPY frontend/ ./
 # NEXT_PUBLIC_API_URL is intentionally empty: the browser uses the same-origin
 # /_lifeos-api prefix from lib/api.ts, and next.config.ts rewrites it internally.
 ENV NEXT_PUBLIC_API_URL=""
-# NEXT_PUBLIC_LIFEOS_TOKEN stays empty by default; users paste the token via
-# Settings -> Security. Baking a token at build time is an opt-in convenience.
-ARG NEXT_PUBLIC_LIFEOS_TOKEN=""
-ENV NEXT_PUBLIC_LIFEOS_TOKEN=$NEXT_PUBLIC_LIFEOS_TOKEN
 RUN bun run build
 
 # ── Stage 3: runtime ─────────────────────────────────────────────────────────
