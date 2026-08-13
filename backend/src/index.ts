@@ -2429,14 +2429,20 @@ app.post("/holdings/sync-gmail", async (c) => {
 // is informational only (used for the note) and never touches the stored average cost.
 // Position fully closed (shares -> ~0) deletes the row rather than leaving a zero-share ghost.
 function applyTrade(symbol: string, kind: string, shares: number, cost_basis: number, currency: string, note: string, side: "BUY" | "SELL" = "BUY", importedFrom: string | null = null, isin?: string) {
+  // MF Order History must NEVER merge into a MF Holdings snapshot row.
+  // The snapshot already reflects all purchases — merging would double-count units.
+  // Restrict the lookup to same-source rows when the source is groww_mf_orders.
+  const scopeFilter = importedFrom === "groww_mf_orders"
+    ? " AND imported_from='groww_mf_orders'"
+    : "";
+
   // Three-way lookup in priority order:
-  //  1. ISIN match (most reliable, bridges Holdings Statement truncated names vs Order
-  //     History tickers: "ASTER DM" in one file, "ASTERDM" in the other, same ISIN).
-  //  2. Exact symbol match, COLLATE NOCASE (covers MF case differences).
-  //  3. Symbol LIKE sym.% (covers post-/holdings/resolve .NS/.BO suffix variants).
+  //  1. ISIN match — bridges Holdings Statement truncated names vs Order History tickers.
+  //  2. Exact symbol match, COLLATE NOCASE — covers MF case differences.
+  //  3. Symbol LIKE sym.% — covers post-/holdings/resolve .NS/.BO suffix variants.
   const existing =
-    (isin ? q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE isin=?", isin) : null) ??
-    q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE symbol = ? COLLATE NOCASE OR symbol LIKE ? COLLATE NOCASE",
+    (isin ? q1<any>(`SELECT id, shares, cost_basis FROM holdings WHERE isin=?${scopeFilter}`, isin) : null) ??
+    q1<any>(`SELECT id, shares, cost_basis FROM holdings WHERE (symbol = ? COLLATE NOCASE OR symbol LIKE ? COLLATE NOCASE)${scopeFilter}`,
       symbol, symbol + ".%"
     );
   if (side === "SELL") {
