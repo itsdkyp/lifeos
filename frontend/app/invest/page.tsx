@@ -340,7 +340,12 @@ function BucketCard({ bucket, onDelete, onEditSip }: { bucket: Bucket; onDelete:
                 {(h as any)._folios && <span className="text-[9px] uppercase text-muted-foreground/70 shrink-0">×{(h as any)._folios}</span>}
                 {(h as any).price_source === "report" && <span className="text-[9px] uppercase text-amber-500/80 shrink-0">rpt</span>}
               </div>
-              <div className="text-[11px] text-muted-foreground truncate">{h.shares.toLocaleString(undefined, { maximumFractionDigits: 3 })} × {sym}{h.cost_basis.toFixed(2)}</div>
+              <div className="text-[11px] text-muted-foreground truncate">
+                {h.shares.toLocaleString(undefined, { maximumFractionDigits: 3 })} × {sym}{((h as any).price ?? h.cost_basis).toFixed(2)}
+                {(h as any).price && (h as any).price !== h.cost_basis && (
+                  <span className="opacity-60"> (avg {sym}{h.cost_basis.toFixed(2)})</span>
+                )}
+              </div>
             </div>
             <div className="text-right shrink-0">
               <div className="tabular-nums">{sym}{Math.round(h.value).toLocaleString()}</div>
