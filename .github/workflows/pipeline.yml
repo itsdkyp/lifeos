@@ -169,9 +169,12 @@ jobs:
           echo ""
 
           # Fresh instance: no account configured yet
-          STATUS=$(curl -s http://localhost:3000/_lifeos-api/session/status)
-          echo "session/status: $STATUS"
-          echo $STATUS | python3 -c 'import json,sys;d=json.load(sys.stdin);assert not d["configured"],"expected configured=false"'
+          curl -s http://localhost:3000/_lifeos-api/session/status | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("session/status:",d)
+assert not d["configured"],"expected configured=false"
+'
 
           # /profile is 401 before setup (no session, no API token)
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/_lifeos-api/profile)" = "401"
