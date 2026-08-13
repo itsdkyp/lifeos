@@ -9,6 +9,8 @@ import { CommandPalette } from "./command-palette";
 import { ProfileProvider, useProfile } from "@/lib/profile";
 import { OnboardingModal } from "./onboarding";
 import { ThemeProvider, useTheme } from "@/lib/theme";
+import { AuthProvider } from "@/lib/auth";
+import { AuthGate } from "./auth-gate";
 
 type NavItem = { href: string; label: string; icon: any };
 type Section = { label?: string; href?: string; icon?: any; items: NavItem[] };
@@ -43,9 +45,13 @@ const items = sections.flatMap(s => s.items);
 export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider>
-      <ProfileProvider>
-        <ShellInner>{children}</ShellInner>
-      </ProfileProvider>
+      <AuthProvider>
+        <AuthGate>
+          <ProfileProvider>
+            <ShellInner>{children}</ShellInner>
+          </ProfileProvider>
+        </AuthGate>
+      </AuthProvider>
     </ThemeProvider>
   );
 }
@@ -53,7 +59,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 function ShellInner({ children }: { children: React.ReactNode }) {
   const p = usePathname();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const { profile, loading, unauthorized } = useProfile();
+  const { profile, loading } = useProfile();
   const [timerActive, setTimerActive] = useState(false);
 
   useEffect(() => {
@@ -129,7 +135,6 @@ function ShellInner({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="flex-1 min-w-0 p-4 pb-24 md:p-8 md:pb-8 overflow-x-hidden">
-        {unauthorized && p !== "/settings" && <UnauthorizedBanner />}
         {children}
       </main>
 
@@ -160,22 +165,15 @@ function ShellInner({ children }: { children: React.ReactNode }) {
       </button>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-      {/* Never show the "new user" wizard for an auth failure — a wrong/missing
-          token means "prompt for the token" (the banner below), not "collect a name
-          and DOB again". Otherwise a fresh device/browser gets trapped behind a
-          full-screen modal with no way to reach Settings. */}
-      <OnboardingModal open={!loading && !profile && !unauthorized} />
-    </div>
-  );
-}
-
-function UnauthorizedBanner() {
-  return (
-    <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-700 dark:text-amber-300">
-      <span>This browser isn't authorized on this device yet — paste your access token to unlock everything.</span>
-      <Link href="/settings?tab=security" className="shrink-0 rounded-md bg-amber-500/20 px-3 py-1 font-medium hover:bg-amber-500/30">
-        Go to Settings → Security
-      </Link>
+      {/* AuthGate (wrapping this whole Shell) already guarantees we're authenticated by
+          the time this renders, so !profile here can only mean "genuinely no profile
+          row yet" — no more "auth failure disguised as new user" case to worry about.
+          One known gap: /session/setup creates a minimal profile (name=username) on
+          first run, so a brand-new install won't actually hit this "no profile" case—
+          the fuller onboarding (DOB, currency, values, goal) has to be filled in via
+          Settings afterward rather than being proactively prompted. Acceptable trade
+          for now; revisit if that friction turns out to matter. */}
+      <OnboardingModal open={!loading && !profile} />
     </div>
   );
 }

@@ -3,10 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        # Optional: bake the token into the browser bundle so every device is authed
-        # without needing to paste it into Settings -> Security. Skip for flexibility.
-        NEXT_PUBLIC_LIFEOS_TOKEN: ${NEXT_PUBLIC_LIFEOS_TOKEN:-}
     image: lifeos
     container_name: lifeos
     restart: unless-stopped
@@ -16,9 +12,6 @@ services:
       # proxies to the backend via the Next.js rewrite in next.config.ts.
       - "${LIFEOS_PORT:-3000}:3000"
     environment:
-      # REQUIRED whenever the port is reachable beyond localhost. Generate:
-      #   openssl rand -hex 32
-      LIFEOS_TOKEN: ${LIFEOS_TOKEN:-}
       # Container timezone — controls how the backend buckets "today" via SQL's
       # date(ts,'localtime'). Set to your local TZ (e.g. Asia/Kolkata, Europe/Berlin,
       # America/New_York) so day-based aggregates match your wall clock. Defaults

@@ -15,38 +15,28 @@ if (typeof window !== "undefined" && (!envApiUrl || envApiUrl.length === 0)) {
   API = `${window.location.origin}${API_PREFIX}`;
 }
 
-// Bearer token for remote/exposed setups. Priority:
-//   1. localStorage "lifeos_token" — set via Settings, editable at runtime.
-//   2. NEXT_PUBLIC_LIFEOS_TOKEN env — baked at build time, for self-hosted flows.
-export function getAuthToken(): string | null {
-  if (typeof window !== "undefined") {
-    try {
-      const stored = window.localStorage.getItem("lifeos_token");
-      if (stored) return stored;
-    } catch {}
-  }
-  return process.env.NEXT_PUBLIC_LIFEOS_TOKEN ?? null;
-}
+// Auth is cookie-based now (session set by POST /auth/login, httpOnly). Since every
+// request is same-origin (the /_lifeos-api rewrite), the browser attaches that cookie
+// automatically on every fetch() — that's the Fetch API's default `credentials:
+// "same-origin"` behavior, nothing to configure here. API-token bearer auth (for
+// MCP/scripts) is handled entirely server-side; the browser never touches that value.
 
-export function setAuthToken(token: string | null) {
-  if (typeof window === "undefined") return;
-  if (token) window.localStorage.setItem("lifeos_token", token);
-  else window.localStorage.removeItem("lifeos_token");
-}
+// Registered by AuthProvider (lib/auth.tsx) so that ANY 401 from ANY API call — not
+// just the initial page load — immediately flips the app back to the login gate,
+// e.g. if a session is invalidated elsewhere while a tab is still open.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) { onUnauthorized = fn; }
 
-// Public helper for streaming/multipart calls that can't go through req().
+// Public helper for streaming/multipart/download calls that can't go through req().
 export function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const token = getAuthToken();
-  const headers = new Headers(init.headers);
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(`${API}${path}`, { ...init, headers });
+  return fetch(`${API}${path}`, init);
 }
 
 export function apiBase(): string { return API; }
 
 // Thrown by req() on any non-2xx response. Carries the HTTP status so callers can
-// tell "not authorized" (401 — need a token) apart from "not found"/"bad request"/
-// other real errors, instead of lumping every failure into a generic catch.
+// tell "not authorized" (401 — session expired/missing) apart from "not found"/
+// "bad request"/other real errors, instead of lumping every failure into a generic catch.
 export class ApiError extends Error {
   status: number;
   constructor(status: number, body: string) {
@@ -56,20 +46,36 @@ export class ApiError extends Error {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getAuthToken();
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   const r = await fetch(`${API}${path}`, {
     ...init,
     headers,
     cache: "no-store",
   });
-  if (!r.ok) throw new ApiError(r.status, await r.text());
+  if (!r.ok) {
+    if (r.status === 401) onUnauthorized?.();
+    throw new ApiError(r.status, await r.text());
+  }
   return r.json() as Promise<T>;
 }
 
 export const api = {
+  // App's own login (password auth). Named "session*" to stay distinct from the
+  // pre-existing authStatus/authLogout below, which are about third-party OAuth
+  // provider connections (Google/Copilot/Anthropic), a different concept entirely.
+  sessionStatus: () => req<{ configured: boolean; authenticated: boolean }>(`/session/status`),
+  sessionSetup: (username: string, password: string) =>
+    req(`/session/setup`, { method: "POST", body: JSON.stringify({ username, password }) }),
+  sessionLogin: (username: string, password: string) =>
+    req(`/session/login`, { method: "POST", body: JSON.stringify({ username, password }) }),
+  sessionLogout: () => req(`/session/logout`, { method: "POST" }),
+  sessionChangePassword: (current_password: string, new_password: string) =>
+    req(`/session/change-password`, { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
+  apiTokens: () => req<{ id: number; name: string; created_at: string; last_used_at: string | null }[]>(`/api-tokens`),
+  apiTokenCreate: (name: string) => req<{ token: string; name: string }>(`/api-tokens`, { method: "POST", body: JSON.stringify({ name }) }),
+  apiTokenDelete: (id: number) => req(`/api-tokens/${id}`, { method: "DELETE" }),
+
   summary: (days = 7) => req<Summary>(`/summary?days=${days}`),
   journalGet: (day: string) => req<{ day: string; content: string }>(`/journal/${day}`),
   journalSave: (day: string, content: string) =>

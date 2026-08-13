@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useProfile } from "@/lib/profile";
 import type { Profile } from "@/lib/api";
-import { api, apiBase, getAuthToken } from "@/lib/api";
+import { api, apiBase } from "@/lib/api";
 import { Card } from "@/components/card";
 import { LLMSettings } from "@/components/llm-settings";
 import { SecuritySettings } from "@/components/security-settings";
@@ -53,11 +53,9 @@ export default function Page() {
   }
 
   async function exportDb() {
-    // Bearer tokens can't be sent via window.open(). Use ?token=... query param instead,
-    // which the backend accepts specifically for download endpoints.
-    const token = getAuthToken();
-    const qs = token ? `?token=${encodeURIComponent(token)}` : "";
-    window.open(`${apiBase()}/dev/export${qs}`, "_blank");
+    // Session auth is a cookie now, which rides along automatically on a same-origin
+    // window.open() navigation — no token/query-param plumbing needed.
+    window.open(`${apiBase()}/dev/export`, "_blank");
   }
 
   async function importDb(e: React.ChangeEvent<HTMLInputElement>) {

@@ -98,9 +98,11 @@ Edit `.env`. Two variables matter for the first run:
 
 | Variable | Purpose |
 |---|---|
-| `LIFEOS_TOKEN` | Shared bearer secret. **Required** whenever the port is reachable beyond localhost. Generate with `openssl rand -hex 32`. |
 | `TZ` | Container timezone (e.g. `Asia/Kolkata`, `Europe/Berlin`, `America/New_York`). Controls how the backend buckets "today." Default `UTC`; set this or your daily aggregates will drift by up to 24h. |
 | `VAULT_PATH` | Absolute host path to your Obsidian vault. Optional — leave unset if you don't use Obsidian sync. |
+
+Auth is configured **inside the app**, not via env vars. On the first page load you'll be
+prompted to create a username and password. No `LIFEOS_TOKEN` to generate or paste.
 
 Everything else has sane defaults.
 
@@ -206,8 +208,8 @@ on backend start.
   rebuild.
 - Daily aggregates off by ~24h — you didn't set `TZ` in `.env`. The container defaults to
   UTC. Set it to your local IANA zone and `docker compose up -d --force-recreate`.
-- Frontend says "Not authorized" after paste — the token in the browser and the token in the
-  backend `.env` don't match. Regenerate on one side, paste on the other.
+- Forgot your password — see **Remote access & auth → First run** above for the SQLite
+  reset procedure.
 - `docker compose ps` says `no configuration file provided` — you're not in the repo root.
 - Backend logs missing but frontend logs present — either the backend crashed on startup
   (`docker logs lifeos` will show `[backend] ...` prefix) or the entrypoint's health probe is
@@ -262,85 +264,60 @@ Each file has frontmatter (`mood`, `spent`, `income`, `work_hours`) so Obsidian'
 
 ---
 
-## Remote access & auth (phone, tablet, tunnels)
+## Remote access & auth
 
-By default LifeOS binds to `127.0.0.1` and runs without authentication — fine for local dev.
-To reach it from another device you need to (1) open the port and (2) turn on the bearer-token gate.
-Everything is wired for both.
+LifeOS now uses **username + password login** as its only authentication mechanism for
+browser access, and **user-generated API tokens** for programmatic access (MCP clients,
+scripts, curl). There is no longer a shared `LIFEOS_TOKEN` environment variable.
 
-### Step 1 — generate a shared secret (once)
+### First run — create your account
 
-```bash
-openssl rand -hex 32
-```
+On the very first page load (or first launch of a fresh Docker container), LifeOS shows a
+mandatory **"Secure your LifeOS"** form. Fill in a username and password — this creates
+the one account for this instance and immediately logs you in.
 
-Copy the 64-char hex string. You'll paste it in two places.
+- **Minimum:** username 3+ chars, password 8+ chars.
+- **No recovery flow:** if you forget your password, the only way back in is to SSH into
+  the host and clear the credentials in SQLite:
+  ```bash
+  sqlite3 /data/lifeos.db "UPDATE profile SET username=NULL, password_hash=NULL WHERE id=1"
+  ```
+  Then reload the app — you'll see the setup form again.
+- **One account only:** LifeOS is single-user. The setup endpoint permanently locks itself
+  after first use (returns 403 on any further calls).
 
-### Step 2 — tell the backend to accept it
+### Logging in on a new device or browser
 
-Edit `backend/.env` and uncomment / fill:
+Sessions are stored as httpOnly cookies — no token paste, no `localStorage` juggling. Just
+visit the URL and enter your username + password. The session persists until you explicitly
+log out (there is no automatic expiry, by design).
 
-```env
-LIFEOS_BIND=0.0.0.0
-LIFEOS_TOKEN=paste-your-64-char-hex-here
-```
+**Logging out:** Settings → Security → Log out. This immediately invalidates the session
+server-side — reopening the tab or using the old cookie gives a 401 instantly.
 
-Restart the backend. You'll see the new bind address in the startup log. If you set
-`LIFEOS_BIND=0.0.0.0` **without** a token, the backend refuses to start silently — it logs a
-big warning telling you exactly why.
+### API tokens (for MCP clients, scripts, curl)
 
-### Step 3 — register the token in the browser
+For anything that's not a browser — Claude Desktop, Cursor, a backup script, or `curl` —
+you need a user-generated API token:
 
-Because the backend blocks unauthenticated requests, opening LifeOS on a fresh device
-will show an amber "Not authorized" banner.
+1. Log in with your username + password.
+2. Go to **Settings → Security → API Tokens**.
+3. Click **Generate**, give it a name (e.g. "Claude Desktop", "backup script").
+4. Copy the token **now** — it's shown exactly once and never retrievable again (only its
+   SHA-256 hash is stored in the database).
+5. Use it as a Bearer header: `Authorization: Bearer <token>`.
 
-1. Click the link in the banner to go to **Settings → Security**.
-2. Paste your `LIFEOS_TOKEN` and click save.
-3. The green **Authenticated** badge should appear — that's your confirmation.
-4. The browser stores it in `localStorage` and uses it for all future requests.
+Tokens can be revoked individually from the same Settings page at any time. A revoked token
+stops working immediately — no restart required.
 
-*Alternative (zero-paste):* If you don't want to paste the token on every device, you can
-bake it directly into the frontend. Set `NEXT_PUBLIC_LIFEOS_TOKEN` in your `.env` to the
-same value as `LIFEOS_TOKEN` and run `docker compose build`.
-**Trade-off:** The token becomes extractable from the downloaded JavaScript bundle. Anyone
-who can reach the URL can read the token. For a home-LAN / Tailscale setup, this is fine
-(they're already on your trusted network). Do not do this if your LifeOS port is exposed
-to the public internet.
+**Privilege restriction:** API tokens can call any regular endpoint (accounts, finance, LLM
+chat, etc.) but cannot manage tokens themselves (`GET/POST/DELETE /api-tokens`) or change
+your password. Those operations require a logged-in browser session. This means a leaked
+MCP token cannot mint itself more tokens or change the password.
 
-### Step 4 — pick a remote-access path
+### MCP clients (Claude Desktop, Cursor)
 
-**Option A — Tailscale (recommended for personal use)**
-
-```bash
-brew install tailscale && brew services start tailscale && tailscale up
-```
-
-Install Tailscale on your phone from the App Store, sign in to the same account. From your phone
-browser: `http://YOUR-MAC-NAME:3000` (MagicDNS handles the hostname). Then Settings → Security
-→ paste token.
-
-**Option B — same-Wi-Fi LAN only (no extra software)**
-
-```bash
-ipconfig getifaddr en0        # your Mac's LAN IP, e.g. 192.168.1.42
-```
-
-From your phone browser: `http://192.168.1.42:3000`. Paste token in Settings → Security.
-Anyone else on the same Wi-Fi with the token can reach you — that's why the token matters.
-
-**Option C — public HTTPS URL (Cloudflare Tunnel)**
-
-```bash
-brew install cloudflared
-cloudflared tunnel --url http://localhost:3000
-```
-
-You get a `https://random-name.trycloudflare.com` URL. **The token is your only defense** —
-pick a strong one, keep it in a password manager, rotate it if you ever suspect leakage.
-
-### Step 5 — MCP clients (Claude Desktop, Cursor)
-
-When auth is enabled, MCP tools need the token too. Add it to the `env` block:
+Generate an API token (above), then add it to your MCP client config:
 
 ```json
 {
@@ -350,37 +327,74 @@ When auth is enabled, MCP tools need the token too. Add it to the `env` block:
       "args": ["run", "/Users/dileep/Desktop/Projects/lifeos/backend/src/mcp.ts"],
       "env": {
         "LIFEOS_API_URL": "http://127.0.0.1:8787",
-        "LIFEOS_TOKEN": "paste-your-64-char-hex-here"
+        "LIFEOS_API_TOKEN": "your-generated-token-here"
       }
     }
   }
 }
 ```
 
+Note: the env key is `LIFEOS_API_TOKEN` (not `LIFEOS_TOKEN` — that no longer exists).
 Claude Desktop config lives at `~/Library/Application Support/Claude/claude_desktop_config.json`.
 Fully quit + reopen after editing.
 
-### What if I lose the token?
+### Exposing LifeOS to the internet (Cloudflare Tunnel)
 
-1. Edit `backend/.env`, put a fresh `openssl rand -hex 32`.
-2. Restart the backend.
-3. Update the token in every browser's Settings → Security and in the Claude config.
-
-The old token is instantly invalidated the moment the backend restarts.
-
-### What the middleware actually does
-
-- Reads `LIFEOS_TOKEN` at startup. If unset, auth is disabled (localhost-friendly default).
-- If set, every route requires `Authorization: Bearer <token>` **except** `/health` (kept open for
-  load-balancer probes) and CORS `OPTIONS` preflights.
-- Also accepts `?token=<hex>` as a query string for endpoints that can't set headers (e.g. the
-  `/dev/export` file download opened via `window.open`).
-- Rejects anything else with `401 { "error": "Unauthorized. Set Authorization: Bearer <token>." }`.
-
-### Verifying end-to-end
+The recommended path for public internet access is a **named Cloudflare Tunnel** — it
+requires no static IP, no router port-forwarding, and works behind CGNAT. Your LifeOS
+password is what protects the app; no separate `LIFEOS_TOKEN` env var is needed.
 
 ```bash
-cd backend && bun run smoke    # 43/43 pass, with or without a token set
+# on your always-on machine (e.g. the Pi)
+sudo apt install cloudflared
+cloudflared tunnel login                              # opens a browser URL to authorise
+cloudflared tunnel create lifeos
+cloudflared tunnel route dns lifeos lifeos.yourdomain.com
+
+# create /etc/cloudflared/config.yml
+tunnel: lifeos
+credentials-file: /home/you/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: lifeos.yourdomain.com
+    service: http://localhost:3000
+  - service: http_status:404
+
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+After that, `https://lifeos.yourdomain.com` reaches your LifeOS login page. Your username
+and password are the only gate — protect them like any online account.
+
+**Reboot survival:** Docker (`restart: unless-stopped`) and the `cloudflared` systemd
+service both auto-start. Verify with:
+```bash
+sudo systemctl is-enabled docker cloudflared   # both should say "enabled"
+sudo reboot                                    # then check both are running 60s later
+```
+
+**Cookie security note:** LifeOS automatically marks the session cookie `Secure` when
+requests arrive via HTTPS (detected from Cloudflare's `X-Forwarded-Proto` header). Over
+plain HTTP (LAN, localhost) the cookie is sent unencrypted — fine on a trusted network,
+reasonable risk. Behind the Cloudflare Tunnel, TLS is always enforced.
+
+### Rate limiting
+
+The login endpoint enforces a basic rate limit: **10 failed attempts within 15 minutes**
+trigger a temporary lockout (`429 Too Many Requests`). This is the primary defence against
+brute-force attacks when LifeOS is internet-facing. The counter resets automatically after
+the window expires.
+
+### Smoke testing with auth enabled
+
+```bash
+# Against a fresh / unconfigured instance (e.g. CI):
+cd backend && bun run smoke
+# The runner self-registers a throwaway account and runs all 46 checks.
+
+# Against your own already-configured instance:
+# 1. Generate a token in Settings -> Security -> API Tokens.
+# 2. LIFEOS_API_TOKEN=<token> bun run smoke
 ```
 
 ---
@@ -409,8 +423,11 @@ Backend has one self-check: `cd backend && bun run check`.
 
 ## Deliberately skipped
 
-- Multi-user auth: shared bearer token covers the personal-use threat model. Add real user
-  accounts when: multiple people share a deployment.
+- Multi-user auth: single username+password covers the personal-use threat model. Add real
+  user accounts (with row-level isolation) when multiple people share a deployment.
 - Calendar month-view page: dashboard covers "today"; add when: you actually miss browsing back.
 - Recurring transactions, budgets: add when: manual entry gets annoying.
 - Tauri packaging: works today via `make dev` and Docker; wrap when: you want a dock icon.
+- Token expiry: sessions and API tokens are both valid until explicitly revoked or logged out.
+  Add expiry (e.g. 90-day rolling TTL) when: you expose LifeOS to a broader audience where
+  long-lived sessions become a meaningful risk.

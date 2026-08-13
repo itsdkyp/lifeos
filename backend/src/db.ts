@@ -143,6 +143,16 @@ CREATE TABLE IF NOT EXISTS holdings (
 CREATE INDEX IF NOT EXISTS idx_hold_symbol ON holdings(symbol);
 CREATE INDEX IF NOT EXISTS idx_hold_imported_from ON holdings(imported_from);
 
+-- Idempotency ledger for trade-delta imports (Groww Order History, etc). Each row
+-- is one broker order ID we've already applied to holdings. Re-importing the same
+-- file (or an overlapping-date re-export) checks this before touching a position,
+-- so uploading a file twice can never double-count shares.
+CREATE TABLE IF NOT EXISTS imported_order_ids (
+  order_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS profile (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL,
@@ -191,6 +201,11 @@ if (!holdingCols.includes("manual_price"))  db.exec("ALTER TABLE holdings ADD CO
 if (!holdingCols.includes("imported_from")) db.exec("ALTER TABLE holdings ADD COLUMN imported_from TEXT");
 if (!holdingCols.includes("monthly_contribution"))     db.exec("ALTER TABLE holdings ADD COLUMN monthly_contribution REAL DEFAULT 0");
 if (!holdingCols.includes("contribution_last_applied")) db.exec("ALTER TABLE holdings ADD COLUMN contribution_last_applied TEXT");
+// ISIN enables cross-format deduplication: Stocks Holdings Statement stores truncated
+// company names ("ASTER DM") while Order History stores exchange tickers ("ASTERDM").
+// These can't be matched by name, but both carry the same ISIN (e.g. INE914M01019).
+if (!holdingCols.includes("isin")) db.exec("ALTER TABLE holdings ADD COLUMN isin TEXT");
+db.exec("CREATE INDEX IF NOT EXISTS idx_hold_isin ON holdings(isin) WHERE isin IS NOT NULL");
 
 const txnCols = (db.query("PRAGMA table_info(transactions)").all() as any[]).map(c => c.name);
 if (!txnCols.includes("account_id")) db.exec("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL");
@@ -208,6 +223,37 @@ if (!profileCols.includes("google_client_id")) db.exec("ALTER TABLE profile ADD 
 if (!profileCols.includes("google_client_secret")) db.exec("ALTER TABLE profile ADD COLUMN google_client_secret TEXT");
 if (!profileCols.includes("monthly_budget")) db.exec("ALTER TABLE profile ADD COLUMN monthly_budget REAL");
 if (!profileCols.includes("fixed_categories")) db.exec("ALTER TABLE profile ADD COLUMN fixed_categories TEXT DEFAULT '[]'");
+if (!profileCols.includes("username"))      db.exec("ALTER TABLE profile ADD COLUMN username TEXT");
+if (!profileCols.includes("password_hash")) db.exec("ALTER TABLE profile ADD COLUMN password_hash TEXT");
+
+// Password-login sessions. No expiry column by design — a session is valid until its
+// row is deleted by an explicit /auth/logout. token_hash (not the raw cookie value) is
+// stored so a leaked DB backup can't be replayed as a live session.
+db.exec(`
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+-- User-generated tokens for MCP/API/script access (replaces the old static LIFEOS_TOKEN
+-- env var). Same token_hash-not-raw-value principle as sessions. The raw token is shown
+-- to the user exactly once, at creation time, in the API response — never again.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+
+-- Login attempt log, for brute-force rate limiting on /auth/login.
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempted_at TEXT NOT NULL,
+  success INTEGER NOT NULL
+);
+`);
 
 // Convenience wrappers
 export const q  = <T = any>(sql: string, ...args: any[]) => db.query(sql).all(...args) as T[];
