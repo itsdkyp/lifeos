@@ -172,11 +172,13 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/_lifeos-api/session/status)" = "200"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/_lifeos-api/profile)" = "401"
 
-          # Set up account + mint API token in one sequence
-          COOKIE=$(curl -s -X POST http://localhost:3000/_lifeos-api/session/setup \
+          # Set up account + mint API token
+          curl -s -X POST http://localhost:3000/_lifeos-api/session/setup \
             -H 'Content-Type: application/json' \
             -d '{"username":"citest","password":"cipass12"}' \
-            -c /tmp/ci-cookie.txt 2>/dev/null; grep lifeos_session /tmp/ci-cookie.txt | awk '{print $6"="$7}')
+            -c /tmp/ci-cookie.txt > /dev/null
+          COOKIE=$(awk '/lifeos_session/{print $6"="$7}' /tmp/ci-cookie.txt)
+          echo "cookie captured: ${COOKIE:0:30}"
           API_TOKEN=$(curl -s -X POST http://localhost:3000/_lifeos-api/api-tokens \
             -H 'Content-Type: application/json' \
             -H "Cookie: $COOKIE" \
