@@ -201,6 +201,11 @@ if (!holdingCols.includes("manual_price"))  db.exec("ALTER TABLE holdings ADD CO
 if (!holdingCols.includes("imported_from")) db.exec("ALTER TABLE holdings ADD COLUMN imported_from TEXT");
 if (!holdingCols.includes("monthly_contribution"))     db.exec("ALTER TABLE holdings ADD COLUMN monthly_contribution REAL DEFAULT 0");
 if (!holdingCols.includes("contribution_last_applied")) db.exec("ALTER TABLE holdings ADD COLUMN contribution_last_applied TEXT");
+// ISIN enables cross-format deduplication: Stocks Holdings Statement stores truncated
+// company names ("ASTER DM") while Order History stores exchange tickers ("ASTERDM").
+// These can't be matched by name, but both carry the same ISIN (e.g. INE914M01019).
+if (!holdingCols.includes("isin")) db.exec("ALTER TABLE holdings ADD COLUMN isin TEXT");
+db.exec("CREATE INDEX IF NOT EXISTS idx_hold_isin ON holdings(isin) WHERE isin IS NOT NULL");
 
 const txnCols = (db.query("PRAGMA table_info(transactions)").all() as any[]).map(c => c.name);
 if (!txnCols.includes("account_id")) db.exec("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL");

@@ -2428,8 +2428,17 @@ app.post("/holdings/sync-gmail", async (c) => {
 // NOT change the cost basis of the shares you still hold, so `cost_basis` in that case
 // is informational only (used for the note) and never touches the stored average cost.
 // Position fully closed (shares -> ~0) deletes the row rather than leaving a zero-share ghost.
-function applyTrade(symbol: string, kind: string, shares: number, cost_basis: number, currency: string, note: string, side: "BUY" | "SELL" = "BUY", importedFrom: string | null = null) {
-  const existing = q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE symbol=?", symbol.toUpperCase());
+function applyTrade(symbol: string, kind: string, shares: number, cost_basis: number, currency: string, note: string, side: "BUY" | "SELL" = "BUY", importedFrom: string | null = null, isin?: string) {
+  // Three-way lookup in priority order:
+  //  1. ISIN match (most reliable, bridges Holdings Statement truncated names vs Order
+  //     History tickers: "ASTER DM" in one file, "ASTERDM" in the other, same ISIN).
+  //  2. Exact symbol match, COLLATE NOCASE (covers MF case differences).
+  //  3. Symbol LIKE sym.% (covers post-/holdings/resolve .NS/.BO suffix variants).
+  const existing =
+    (isin ? q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE isin=?", isin) : null) ??
+    q1<any>("SELECT id, shares, cost_basis FROM holdings WHERE symbol = ? COLLATE NOCASE OR symbol LIKE ? COLLATE NOCASE",
+      symbol, symbol + ".%"
+    );
   if (side === "SELL") {
     if (!existing) return; // selling something we have no record of — nothing to decrement, ignore.
     const newShares = existing.shares - shares;
@@ -2442,8 +2451,8 @@ function applyTrade(symbol: string, kind: string, shares: number, cost_basis: nu
     const newCost = ((existing.shares * existing.cost_basis) + (shares * cost_basis)) / newShares;
     run("UPDATE holdings SET shares=?, cost_basis=? WHERE id=?", newShares, newCost, existing.id);
   } else {
-    run("INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,imported_from,created_at) VALUES(?,?,?,?,?,?,?,?)",
-        symbol.toUpperCase(), kind, shares, cost_basis, currency, note, importedFrom, now());
+    run("INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,isin,imported_from,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        symbol, kind, shares, cost_basis, currency, note, isin ?? null, importedFrom, now());
   }
 }
 
@@ -2473,7 +2482,7 @@ app.post("/holdings/import", async (c) => {
         alreadyApplied++;
         continue;
       }
-      applyTrade(t.symbol, t.kind, t.qty, t.price, t.currency, t.note ?? "", t.side, result.source);
+      applyTrade(t.symbol, t.kind, t.qty, t.price, t.currency, t.note ?? "", t.side, result.source, t.isin);
       if (t.orderId) run("INSERT OR IGNORE INTO imported_order_ids(order_id,source,applied_at) VALUES(?,?,?)", t.orderId, result.source, now());
       applied++;
     }
@@ -2519,10 +2528,10 @@ app.post("/holdings/import", async (c) => {
 
   for (const h of result.holdings as NormHolding[]) {
     const sip = preservedSips.get(h.symbol);
-    run(`INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,manual_price,imported_from,created_at,monthly_contribution,contribution_last_applied)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    run(`INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,isin,manual_price,imported_from,created_at,monthly_contribution,contribution_last_applied)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
       h.symbol, h.kind, h.shares, h.cost_basis, h.currency,
-      h.note ?? null, h.manual_price ?? null, h.imported_from, now(),
+      h.note ?? null, h.isin ?? null, h.manual_price ?? null, h.imported_from, now(),
       sip?.monthly ?? 0, sip?.last ?? null);
   }
   return c.json({ source: result.source, imported: result.imported, skipped: result.skipped, consolidated });
