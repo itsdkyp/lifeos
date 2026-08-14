@@ -2091,7 +2091,7 @@ app.get("/holdings", async (c) => {
 
   const nowMs = Date.now();
   const yahooEntries = await Promise.all([...new Set(yahooTargets)].map(async (sym): Promise<[string, { price: number; prevClose: number; currency: string } | null]> => {
-    if (yahooCache[sym] && nowMs - yahooCache[sym].at < 15_000) {
+    if (yahooCache[sym] && nowMs - yahooCache[sym].at < 300_000) {  // 5-min cache: brief hiccups/restarts serve the last good price instead of silently falling back to cost_basis
       return [sym, yahooCache[sym].data];
     }
     try {

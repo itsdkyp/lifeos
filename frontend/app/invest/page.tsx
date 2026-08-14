@@ -339,6 +339,7 @@ function BucketCard({ bucket, onDelete, onEditSip }: { bucket: Bucket; onDelete:
                 <span className="truncate">{h.symbol}</span>
                 {(h as any)._folios && <span className="text-[9px] uppercase text-muted-foreground/70 shrink-0">×{(h as any)._folios}</span>}
                 {(h as any).price_source === "report" && <span className="text-[9px] uppercase text-amber-500/80 shrink-0">rpt</span>}
+                {(h as any).price_source === "cost" && <span className="text-[9px] uppercase text-amber-500 shrink-0" title="Live price unavailable — showing avg buy price">avg·only</span>}
               </div>
               <div className="text-[11px] text-muted-foreground truncate">
                 {h.shares.toLocaleString(undefined, { maximumFractionDigits: 3 })} × {sym}{((h as any).price ?? h.cost_basis).toFixed(2)}
