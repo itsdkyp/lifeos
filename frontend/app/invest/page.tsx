@@ -383,7 +383,7 @@ function BucketCard({ bucket, onDelete, onEditSip }: { bucket: Bucket; onDelete:
 
 function AddForm({ onDone }: { onDone: () => void }) {
   const [symbol, setSymbol] = useState("");
-  const [kind, setKind] = useState<"stock"|"etf"|"crypto"|"mf"|"debt">("stock");
+  const [kind, setKind] = useState<"stock"|"etf"|"crypto"|"mf"|"debt"|"epf">("stock");
   const [shares, setShares] = useState("");
   const [cost, setCost] = useState("");
   const [currency, setCurrency] = useState("USD");
@@ -392,40 +392,55 @@ function AddForm({ onDone }: { onDone: () => void }) {
   useEffect(() => { setCurrency(profile?.currency ?? "USD"); }, [profile]);
 
   async function add() {
-    const sh = parseFloat(shares), cb = parseFloat(cost);
-    if (!symbol.trim() || !sh || !cb) return;
+    const isEpf = kind === "epf";
+    const submitKind = isEpf ? "debt" : kind;
+    const submitSymbol = isEpf ? (symbol.trim() || "EPF").toUpperCase() : symbol.toUpperCase();
+    const sh = isEpf ? 1 : parseFloat(shares);
+    const cb = parseFloat(cost);
+    
+    if (!submitSymbol.trim() || !sh || !cb) return;
     const mc = parseFloat(monthly);
-    await api.holdingAdd({ symbol: symbol.toUpperCase(), kind, shares: sh, cost_basis: cb, currency,
+    await api.holdingAdd({ symbol: submitSymbol, kind: submitKind, shares: sh, cost_basis: cb, currency,
       monthly_contribution: Number.isFinite(mc) && mc > 0 ? mc : undefined });
     setSymbol(""); setShares(""); setCost(""); setMonthly("");
     onDone();
   }
-  const showMonthly = kind === "debt" || kind === "mf";
+  
+  const isEpf = kind === "epf";
+  const showMonthly = kind === "debt" || kind === "mf" || isEpf;
+  
   return (
     <div className="space-y-3">
       <div className="grid gap-2 md:grid-cols-6">
         <div className="md:col-span-2">
-          <SymbolAutocomplete value={symbol}
-            onChange={v => setSymbol(v.toUpperCase())}
-            onPick={p => { setSymbol(p.symbol); setKind(p.kind); setCurrency(p.currency); }} />
+          {isEpf ? (
+            <input value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} placeholder="Account name (e.g. EPF, PPF)" className={inputCls} />
+          ) : (
+            <SymbolAutocomplete value={symbol}
+              onChange={v => setSymbol(v.toUpperCase())}
+              onPick={p => { setSymbol(p.symbol); setKind(p.kind as any); setCurrency(p.currency); }} />
+          )}
         </div>
         <select value={kind} onChange={e => setKind(e.target.value as any)} className={inputCls}>
           <option value="stock">stock</option><option value="etf">ETF</option>
           <option value="mf">mutual fund</option>
-          <option value="debt">debt / fixed income</option>
           <option value="crypto">crypto</option>
+          <option value="debt">debt / fixed income</option>
+          <option value="epf">Retirement (EPF / PPF)</option>
         </select>
-        <input value={shares} onChange={e => setShares(e.target.value)} placeholder={kind === "debt" ? "units (use 1 for balance-style)" : "shares"} type="number" step="any" className={inputCls} />
-        <input value={cost}   onChange={e => setCost(e.target.value)}   placeholder={kind === "debt" ? "current balance / unit" : "cost / unit"} type="number" step="any" className={inputCls} />
+        {!isEpf && (
+          <input value={shares} onChange={e => setShares(e.target.value)} placeholder={kind === "debt" ? "units" : "shares"} type="number" step="any" className={inputCls} />
+        )}
+        <input value={cost} onChange={e => setCost(e.target.value)} placeholder={isEpf ? "Current Total Balance" : (kind === "debt" ? "current balance / unit" : "cost / unit")} type="number" step="any" className={cn(inputCls, isEpf && "md:col-span-2")} />
         <button onClick={add} className="rounded-md bg-primary text-primary-foreground px-4 hover:opacity-90 flex items-center justify-center gap-1 text-sm">
           <Plus className="h-4 w-4" /> Add
         </button>
       </div>
       {showMonthly && (
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-muted-foreground">Monthly contribution (auto-added on each month):</label>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-xs text-muted-foreground">Monthly contribution (auto-adds to balance every month):</label>
           <input value={monthly} onChange={e => setMonthly(e.target.value)}
-            type="number" step="any" placeholder="e.g. 6000 for EPF" className={cn(inputCls, "max-w-[180px]")} />
+            type="number" step="any" placeholder="e.g. 5000" className={cn(inputCls, "max-w-[180px]")} />
           <span className="text-[11px] text-muted-foreground">Leave blank for none.</span>
         </div>
       )}
