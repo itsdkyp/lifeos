@@ -320,7 +320,7 @@ function BucketCard({ bucket, onDelete, onEditSip }: { bucket: Bucket; onDelete:
       <div className="flex items-baseline justify-between mb-2">
         <div>
           <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{bucket.title}</div>
-          <div className="text-lg font-semibold tabular-nums">{sym}{Math.round(t.value).toLocaleString()}</div>
+          <div className="text-lg font-semibold tabular-nums">{sym}{bucket.currency === "INR" ? Math.round(t.value).toLocaleString() : t.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
         </div>
         <div className="text-right">
           <div className={cn("text-xs tabular-nums font-medium", t.daily_gain >= 0 ? "text-emerald-500" : "text-destructive")}>
@@ -349,7 +349,7 @@ function BucketCard({ bucket, onDelete, onEditSip }: { bucket: Bucket; onDelete:
               </div>
             </div>
             <div className="text-right shrink-0">
-              <div className="tabular-nums">{sym}{Math.round(h.value).toLocaleString()}</div>
+              <div className="tabular-nums">{sym}{bucket.currency === "INR" ? Math.round(h.value).toLocaleString() : h.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
               <div className="flex items-center justify-end gap-1.5">
                 {h.daily_gain_pct != null && h.daily_gain_pct !== 0 && (
                   <div className={cn("text-[10px] tabular-nums font-medium", h.daily_gain_pct >= 0 ? "text-emerald-500" : "text-destructive")}>

@@ -2091,7 +2091,11 @@ app.get("/holdings", async (c) => {
 
   const nowMs = Date.now();
   const yahooEntries = await Promise.all([...new Set(yahooTargets)].map(async (sym): Promise<[string, { price: number; prevClose: number; currency: string } | null]> => {
-    if (yahooCache[sym] && nowMs - yahooCache[sym].at < 300_000) {  // 5-min cache: brief hiccups/restarts serve the last good price instead of silently falling back to cost_basis
+    // Short cache so the 15s frontend poll gets fresh prices during active trading.
+    // Transient Yahoo failures are handled separately below (stale-while-revalidate:
+    // on any fetch error we keep serving the last good cached price), so the TTL only
+    // controls freshness, never the cost_basis fallback (that's a cold-cache-only path).
+    if (yahooCache[sym] && nowMs - yahooCache[sym].at < 12_000) {
       return [sym, yahooCache[sym].data];
     }
     try {
@@ -2498,7 +2502,22 @@ app.post("/holdings/import", async (c) => {
     });
   }
 
-  if (replace) run("DELETE FROM holdings WHERE imported_from = ?", result.source);
+  // Before wiping for re-import: capture any tickers the user already resolved (via
+  // /holdings/resolve, e.g. "ASTER DM" → "ASTERDM.NS"), keyed by ISIN. Without this,
+  // a re-import overwrites the resolved .NS ticker with the raw truncated company name
+  // from the statement, so it loses live pricing until the user resolves again.
+  const resolvedByIsin = new Map<string, string>();
+  if (replace) {
+    const existing = q<any>("SELECT symbol, isin FROM holdings WHERE imported_from = ? AND isin IS NOT NULL", result.source);
+    for (const row of existing) {
+      // A "resolved" symbol has an exchange suffix (.NS/.BO/etc) that the raw
+      // statement name never has. Only those are worth preserving.
+      if (typeof row.symbol === "string" && row.symbol.includes(".")) {
+        resolvedByIsin.set(row.isin, row.symbol);
+      }
+    }
+    run("DELETE FROM holdings WHERE imported_from = ?", result.source);
+  }
 
   // Consolidation: if a MANUAL holding matches an imported symbol (exact or prefix),
   // copy its SIP settings across and delete the manual duplicate.
@@ -2534,9 +2553,12 @@ app.post("/holdings/import", async (c) => {
 
   for (const h of result.holdings as NormHolding[]) {
     const sip = preservedSips.get(h.symbol);
+    // Reuse a previously-resolved ticker (.NS/.BO) for this ISIN so re-import keeps
+    // live pricing instead of reverting to the raw truncated statement name.
+    const symbol = (h.isin && resolvedByIsin.get(h.isin)) || h.symbol;
     run(`INSERT INTO holdings(symbol,kind,shares,cost_basis,currency,note,isin,manual_price,imported_from,created_at,monthly_contribution,contribution_last_applied)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-      h.symbol, h.kind, h.shares, h.cost_basis, h.currency,
+      symbol, h.kind, h.shares, h.cost_basis, h.currency,
       h.note ?? null, h.isin ?? null, h.manual_price ?? null, h.imported_from, now(),
       sip?.monthly ?? 0, sip?.last ?? null);
   }
