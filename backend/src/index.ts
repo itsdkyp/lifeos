@@ -2287,13 +2287,28 @@ function findAmfiScheme(schemes: AmfiScheme[], query: string): AmfiScheme | null
   for (const s of schemes) {
     const sTokens = amfiTokens(s.name);
     if (sTokens.length === 0) continue;
-    const hits = sTokens.filter(t => qSet.has(t)).length;
+    
+    let hits = 0;
+    let firstMatch = false;
+    for (const t of sTokens) {
+      if (qSet.has(t)) {
+        hits++;
+        if (t === qTokens[0]) firstMatch = true;
+      }
+    }
+    
+    // The first word is almost always the AMC (e.g. "Edelweiss", "Quant", "ICICI").
+    // If it doesn't match, this is likely a completely different fund that just happens
+    // to share generic words like "Mid Cap Direct Growth".
+    if (qTokens[0] && !sTokens.includes(qTokens[0])) continue;
+
     if (hits < Math.min(qTokens.length, 3)) continue;
-    // Prefer schemes where most tokens match on BOTH sides.
+    
     const ratioQ = hits / qTokens.length;
     const ratioS = hits / sTokens.length;
     if (ratioQ < 0.6) continue;
-    const score = hits + ratioS;
+    
+    const score = hits + ratioS + (firstMatch ? 2 : 0);
     if (!best || score > best.score) best = { s, score };
   }
   amfiLookup.set(key, best?.s ?? null);
