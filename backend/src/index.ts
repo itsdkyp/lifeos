@@ -2483,8 +2483,29 @@ app.post("/holdings/import", async (c) => {
   // uses. Never honor `replace` here: wiping existing holdings based on a partial window
   // would delete legitimate shares bought/sold outside the exported date range.
   if ("trades" in result) {
-    let applied = 0, alreadyApplied = 0;
-    for (const t of result.trades as NormTrade[]) {
+    let applied = 0, alreadyApplied = 0, snapshotOwned = 0;
+
+    // Snapshot authority: a Holdings Statement (snapshot) is the authoritative current
+    // position for a security. If one already covers this security, skip the order-history
+    // trades for it — otherwise the two sources duplicate/inflate the same position.
+    // Stocks match by ISIN (reliable across truncated-name vs ticker); MF exports have no
+    // ISIN so match by scheme name.
+    const isStockOrders = result.source === "groww_stock_orders";
+    const snapshotSource = isStockOrders ? "groww_stocks" : "groww_mf";
+    const ownedIsins = new Set<string>();
+    const ownedSymbols = new Set<string>();
+    if (isStockOrders) {
+      for (const r of q<any>("SELECT isin FROM holdings WHERE imported_from=? AND isin IS NOT NULL", snapshotSource)) ownedIsins.add(r.isin);
+    } else {
+      for (const r of q<any>("SELECT symbol FROM holdings WHERE imported_from=?", snapshotSource)) ownedSymbols.add(String(r.symbol).toUpperCase());
+    }
+
+    for (const t of (result.trades as NormTrade[]).slice().sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))) {
+      // Snapshot owns this security — the statement's current shares are authoritative.
+      if ((t.isin && ownedIsins.has(t.isin)) || ownedSymbols.has(t.symbol.toUpperCase())) {
+        snapshotOwned++;
+        continue;
+      }
       // Dedup against re-imports: if this exact broker order was already applied
       // (same file re-uploaded, or a fresh export overlapping an earlier one), skip
       // it rather than double-counting the shares.
@@ -2498,7 +2519,8 @@ app.post("/holdings/import", async (c) => {
     }
     return c.json({
       source: result.source, imported: applied,
-      skipped: result.skipped + alreadyApplied, already_applied: alreadyApplied, consolidated: 0,
+      skipped: result.skipped + alreadyApplied + snapshotOwned,
+      already_applied: alreadyApplied, snapshot_owned: snapshotOwned, consolidated: 0,
     });
   }
 
@@ -2562,7 +2584,23 @@ app.post("/holdings/import", async (c) => {
       h.note ?? null, h.isin ?? null, h.manual_price ?? null, h.imported_from, now(),
       sip?.monthly ?? 0, sip?.last ?? null);
   }
-  return c.json({ source: result.source, imported: result.imported, skipped: result.skipped, consolidated });
+
+  // Snapshot authority: this Holdings Statement is now the source of truth for these
+  // securities. Remove any order-history rows covering the same securities so the two
+  // sources don't show as duplicates (handles order-history-imported-first). Stocks
+  // match by ISIN; MFs by scheme name (no ISIN in MF exports).
+  let dedupedOrders = 0;
+  if (result.source === "groww_stocks") {
+    for (const h of result.holdings as NormHolding[]) {
+      if (h.isin) dedupedOrders += run("DELETE FROM holdings WHERE imported_from='groww_stock_orders' AND isin=?", h.isin).changes;
+    }
+  } else if (result.source === "groww_mf") {
+    for (const h of result.holdings as NormHolding[]) {
+      dedupedOrders += run("DELETE FROM holdings WHERE imported_from='groww_mf_orders' AND symbol=? COLLATE NOCASE", h.symbol).changes;
+    }
+  }
+
+  return c.json({ source: result.source, imported: result.imported, skipped: result.skipped, consolidated, deduped_orders: dedupedOrders });
 });
 
 // ── LLM config ─────────────────────────────────────────────────────────────────────────

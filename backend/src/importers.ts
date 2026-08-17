@@ -29,6 +29,10 @@ export type NormTrade = {
   symbol: string; kind: "stock" | "etf" | "mf"; side: "BUY" | "SELL";
   qty: number; price: number; currency: string; note?: string;
   isin?: string;  // for cross-format deduplication
+  // Epoch ms of the trade, for chronological ordering. Order-history exports aren't
+  // always oldest-first (MF exports are newest-first), so applying in file order can
+  // process a SELL before its BUY — the caller sorts by this before applying.
+  ts?: number;
   // Broker's own unique order ID, when the source provides one. Lets the caller
   // dedup against re-imports of the same (or an overlapping) export — without this,
   // uploading the same file twice silently double-applies every trade.
@@ -86,6 +90,24 @@ function num(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// "13-04-2026 09:54 AM" (DD-MM-YYYY, optional time) — Groww stock order history.
+// Date.parse can't handle DD-MM-YYYY reliably, so parse explicitly.
+function parseDmyDate(v: any): number | undefined {
+  const m = String(v ?? "").match(/(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i);
+  if (!m) return undefined;
+  const [, dd, mm, yyyy, hh, min, ap] = m;
+  let h = hh ? parseInt(hh) : 0;
+  if (ap?.toUpperCase() === "PM" && h < 12) h += 12;
+  if (ap?.toUpperCase() === "AM" && h === 12) h = 0;
+  return new Date(+yyyy, +mm - 1, +dd, h, min ? +min : 0).getTime();
+}
+
+// "03 Aug 2026" (DD Mon YYYY) — Groww MF order history. Date.parse handles this natively.
+function parseTextDate(v: any): number | undefined {
+  const t = Date.parse(String(v ?? ""));
+  return Number.isFinite(t) ? t : undefined;
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  Groww Stocks Holdings
 //  Header row: Stock Name | ISIN | Quantity | Average buy price |
@@ -129,7 +151,7 @@ function parseGrowwStockOrders(rows: any[][]): { imported: number; skipped: numb
   let skipped = 0;
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i]; if (!r || r.length === 0) continue;
-    const [name, symbolCol, isin, type, qtyRaw, valueRaw, , orderId, , status] = r;
+    const [name, symbolCol, isin, type, qtyRaw, valueRaw, , orderId, execDate, status] = r;
     if (typeof name !== "string" || !name.trim()) { skipped++; continue; }
     if (typeof status === "string" && !/executed/i.test(status)) { skipped++; continue; } // e.g. rejected/cancelled
     const side = String(type ?? "").toUpperCase();
@@ -145,6 +167,7 @@ function parseGrowwStockOrders(rows: any[][]): { imported: number; skipped: numb
       price: value / qty,
       currency: "INR",
       isin: typeof isin === "string" && isin.trim() ? isin.trim() : undefined,
+      ts: parseDmyDate(execDate),
       note: `Groww (Order History) · ${String(name).trim()}${isin ? ` · ${isin}` : ""}`,
       orderId: orderId != null ? String(orderId) : undefined,
     });
@@ -186,6 +209,7 @@ function parseGrowwMFOrders(rows: any[][]): { imported: number; skipped: number;
       price: nav,
       currency: "INR",
       note: `Groww (MF Order History) · ${schemeName.trim()}`,
+      ts: parseTextDate(dateRaw),
       orderId,
     });
   }
